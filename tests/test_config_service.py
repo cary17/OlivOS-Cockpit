@@ -1,6 +1,8 @@
 """配置驱动服务边界测试；不依赖 aiohttp，使用最小请求桩。"""
 
 import asyncio
+import concurrent.futures
+import errno
 import json
 import os
 import sys
@@ -708,6 +710,415 @@ class ConfigServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(snapshot.ready)
             self.assertFalse(snapshot.valid)
             self.assertGreater(snapshot.generation, generation)
+
+
+class PluginInstallPermissionTests(unittest.TestCase):
+    """安装权限：默认关闭，旧配置缺键按 false，非布尔仍拒绝。"""
+
+    def test_truth_table(self):
+        def snapshot(**values):
+            base = dict(api_key=KEY, valid=True, full_real_account_write=True,
+                        full_plugin_install=True)
+            base.update(values)
+            return config.Snapshot(**base)
+
+        self.assertTrue(snapshot().allows('plugin_install', 'full'))
+        self.assertFalse(snapshot(full_plugin_install=False)
+                         .allows('plugin_install', 'full'))
+        self.assertFalse(snapshot(full_real_account_write=False)
+                         .allows('plugin_install', 'full'))
+        self.assertFalse(snapshot(valid=False).allows('plugin_install', 'full'))
+        self.assertFalse(snapshot(api_key='').allows('plugin_install', 'full'))
+        self.assertFalse(snapshot().allows('plugin_install', 'lite'))
+        self.assertFalse(snapshot().allows('plugin_install', 'bogus'))
+        # 其他权限不因新开关放宽。
+        self.assertFalse(snapshot(full_plugin_install=False, full_real_account_write=False)
+                         .allows('low_level_access', 'full'))
+
+    def test_template_and_old_config_omission(self):
+        self.assertIs(config.config_template()['full_plugin_install'], False)
+        with tempfile.TemporaryDirectory() as directory:
+            data_root = os.path.join(directory, 'data')
+            os.makedirs(data_root)
+            manager = config.ConfigManager(data_root, 'full')
+            try:
+                manager.refresh()
+                manager.refresh()
+                path = Path(config.control_dir(data_root)) / config.CONFIG_NAME
+                data = json.loads(path.read_text('utf-8'))
+                data.pop('full_plugin_install')
+                data['api_key'] = KEY
+                data['full_real_account_write'] = True
+                path.write_text(json.dumps(data), encoding='utf-8')
+                manager.refresh()
+                manager.refresh()
+                snapshot = manager.snapshot()
+                self.assertTrue(snapshot.valid and snapshot.ready)
+                self.assertIs(snapshot.full_plugin_install, False)
+                self.assertFalse(snapshot.allows('plugin_install', 'full'))
+                data['full_plugin_install'] = True
+                path.write_text(json.dumps(data), encoding='utf-8')
+                manager.refresh()
+                manager.refresh()
+                self.assertTrue(manager.snapshot().allows('plugin_install', 'full'))
+                data['full_plugin_install'] = 'yes'
+                path.write_text(json.dumps(data), encoding='utf-8')
+                manager.refresh()
+                manager.refresh()
+                self.assertFalse(manager.snapshot().valid)
+            finally:
+                manager.stop()
+
+
+class PortPersistenceTests(unittest.TestCase):
+    """端口写回只改 listen_port，来源变化/停止/失败都不覆盖。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='cockpit-port-')
+        self.addCleanup(self.temp.cleanup)
+        self.data_root = os.path.join(self.temp.name, 'data')
+        os.makedirs(self.data_root)
+        self.manager = config.ConfigManager(self.data_root, 'full')
+        self.addCleanup(self.manager.stop)
+        self.manager.refresh()
+        self.manager.refresh()
+        self.control = Path(config.control_dir(self.data_root))
+        self.path = self.control / config.CONFIG_NAME
+
+    def ready(self, **updates):
+        data = json.loads(self.path.read_text('utf-8'))
+        data.update({'api_key': KEY, 'listen_port': 8710})
+        data.update(updates)
+        self.path.write_text(json.dumps(data), encoding='utf-8')
+        self.manager.refresh()
+        self.manager.refresh()
+        snapshot = self.manager.snapshot()
+        self.assertTrue(snapshot.ready)
+        return data, snapshot
+
+    def cycle(self):
+        self.manager.refresh()
+        self.manager._process_write_request()
+
+    def test_writeback_changes_only_port_and_keeps_missing_fields(self):
+        data = json.loads(self.path.read_text('utf-8'))
+        data.pop('denied_paths', None)
+        data.update(listen_port=8710, api_key=KEY, full_real_account_write=True)
+        self.path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding='utf-8')
+        self.manager.refresh()
+        self.manager.refresh()
+        snapshot = self.manager.snapshot()
+        self.assertTrue(snapshot.ready)
+        future = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        self.assertIsNotNone(future)
+        self.cycle()
+        self.assertFalse(future.done())
+        self.cycle()  # 第一次观测：撤权
+        self.assertFalse(future.done())
+        self.assertFalse(self.manager.snapshot().valid)
+        self.cycle()  # 第二次一致观测：发布并确认
+        self.assertTrue(future.result(0))
+        written = json.loads(self.path.read_text('utf-8'))
+        expected = dict(data)
+        expected['listen_port'] = 8711
+        self.assertEqual(written, expected)
+        self.assertNotIn('denied_paths', written)
+        published = self.manager.snapshot()
+        self.assertTrue(published.ready)
+        self.assertEqual(published.listen_port, 8711)
+
+    def test_source_change_aborts_without_overwrite(self):
+        data, snapshot = self.ready(listen_port=8710)
+        future = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        changed = dict(data, api_key=NEW_KEY)
+        self.path.write_text(json.dumps(changed), encoding='utf-8')
+        self.cycle()
+        self.assertFalse(future.result(0))
+        self.assertEqual(json.loads(self.path.read_text('utf-8')), changed)
+
+    def test_redaction_change_aborts_without_overwrite(self):
+        data, snapshot = self.ready(listen_port=8710)
+        before = self.path.read_bytes()
+        future = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        redaction = self.control / config.REDACTION_NAME
+        rules = json.loads(redaction.read_text('utf-8'))
+        rules['allow_fields'] = ['some_field']
+        redaction.write_text(json.dumps(rules), encoding='utf-8')
+        self.cycle()
+        self.assertFalse(future.result(0))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_stop_fails_pending_request_and_late_poll_never_writes(self):
+        data, snapshot = self.ready(listen_port=8710)
+        before = self.path.read_bytes()
+        future = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        self.manager.stop()
+        self.assertFalse(future.result(0))
+        self.cycle()
+        self.cycle()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertFalse(self.manager.snapshot().valid)
+
+    def test_replace_failure_reports_false_and_cleans_temp(self):
+        data, snapshot = self.ready(listen_port=8710)
+        before = self.path.read_bytes()
+        future = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        with patch.object(config.os, 'replace', side_effect=OSError(errno.EACCES, 'denied')):
+            self.cycle()
+        self.assertFalse(future.result(0))
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual([item.name for item in self.control.iterdir()
+                          if item.name.endswith('.tmp')], [])
+
+    def test_missing_config_is_not_recreated(self):
+        data, snapshot = self.ready(listen_port=8710)
+        future = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        self.path.unlink()
+        self.cycle()
+        self.assertFalse(future.result(0))
+        self.assertFalse(self.path.exists())
+
+    def test_cancelled_request_is_cleared_without_write(self):
+        data, snapshot = self.ready(listen_port=8710)
+        before = self.path.read_bytes()
+        future = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        future.cancel()
+        self.cycle()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertIsNone(self.manager._write_request)
+
+    def test_single_pending_request(self):
+        data, snapshot = self.ready(listen_port=8710)
+        first = self.manager.request_listen_port(8711, snapshot.fingerprint)
+        self.assertIsNotNone(first)
+        self.assertIsNone(self.manager.request_listen_port(8712, snapshot.fingerprint))
+        self.manager.stop()
+        self.assertFalse(first.result(0))
+
+    def test_request_requires_current_ready_snapshot(self):
+        data, snapshot = self.ready(listen_port=8710)
+        self.assertIsNone(self.manager.request_listen_port(8711, 'stale'))
+        self.assertIsNone(self.manager.request_listen_port(0, snapshot.fingerprint))
+        self.assertIsNone(self.manager.request_listen_port(65536, snapshot.fingerprint))
+
+
+def site_factory(behavior):
+    """构造可编排 start 行为的 TCPSite 替身；记录每个构造的站点。"""
+    made = []
+
+    class Site:
+        def __init__(self, runner, host, port):
+            self.host, self.port = host, port
+            self.started = False
+            self.stopped = False
+            made.append(self)
+
+        async def start(self):
+            action = behavior(self.port)
+            if isinstance(action, BaseException):
+                raise action
+            if action == 'inuse':
+                raise OSError(errno.EADDRINUSE, 'in use')
+            self.started = True
+
+        async def stop(self):
+            self.stopped = True
+
+    return Site, made
+
+
+class PersistManager(Manager):
+    """带写回请求桩的 Manager；事件用于等待服务侧发出请求。"""
+
+    def __init__(self, **values):
+        values.setdefault('fingerprint', 'fingerprint-1')
+        super().__init__(**values)
+        self.requests = []
+        self.requested = threading.Event()
+        self.future = None
+
+    def request_listen_port(self, port, expected):
+        self.requests.append((port, expected))
+        self.future = concurrent.futures.Future()
+        self.requested.set()
+        return self.future
+
+
+class ReconcileFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """端口回退：仅 EADDRINUSE、有界、双栈同端口、临时候选不放行。"""
+
+    def make(self, manager):
+        svc = make_service(manager, ())
+        svc.app = object()
+        svc.runner = object()
+        return svc
+
+    async def test_configured_port_never_requests_writeback(self):
+        manager = PersistManager()
+        svc = self.make(manager)
+        Site, made = site_factory(lambda port: 'ok')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=Site)):
+                await svc._reconcile()
+                await svc._reconcile()
+            self.assertEqual(manager.requests, [])
+            self.assertEqual(len(made), 1)
+            self.assertEqual(svc.bound, ('127.0.0.1', 8767))
+            self.assertTrue(svc._serving)
+        finally:
+            svc.close()
+
+    async def test_non_address_in_use_fails_closed_without_fallback(self):
+        manager = PersistManager()
+        svc = self.make(manager)
+        site, made = site_factory(lambda port: OSError(errno.EACCES, 'denied'))
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                await svc._reconcile()
+            self.assertEqual(len(made), 1)
+            self.assertTrue(made[0].stopped)
+            self.assertIsNone(svc.site)
+            self.assertIsNone(svc.bound)
+            self.assertEqual(manager.requests, [])
+        finally:
+            svc.close()
+
+    async def test_bounded_exhaustion_wraps_after_65535(self):
+        manager = PersistManager(listen_port=65530)
+        svc = self.make(manager)
+        site, made = site_factory(lambda port: 'inuse')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                await svc._reconcile()
+            ports = [item.port for item in made]
+            self.assertEqual(len(ports), 1 + service.PORT_FALLBACK_ATTEMPTS)
+            self.assertEqual(ports[:7], [65530, 65531, 65532, 65533, 65534, 65535, 1024])
+            self.assertTrue(all(1024 <= port <= 65535 for port in ports[1:]))
+            self.assertTrue(all(item.stopped for item in made))
+            self.assertIsNone(svc.site)
+            self.assertEqual(manager.requests, [])
+        finally:
+            svc.close()
+
+    async def test_fallback_is_gated_until_published_then_no_rebind(self):
+        calls = []
+        manager = PersistManager()
+        spec = ToolSpec('echo', 'echo', object_schema(), lambda ctx, args: (
+            calls.append(args), Outcome({'ok': True}))[1])
+        svc = make_service(manager, (spec,))
+        svc.app = object()
+        svc.runner = object()
+        pool = svc.pool
+        busy = {8767}
+        site, made = site_factory(lambda port: 'inuse' if port in busy else 'ok')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                task = asyncio.ensure_future(svc._reconcile())
+                self.assertTrue(await asyncio.to_thread(manager.requested.wait, 2))
+                self.assertEqual(manager.requests[0][0], 8768)
+                self.assertFalse(svc._serving)
+                replies = []
+
+                async def write(_request, reply):
+                    replies.append(reply)
+                    return 'sent'
+
+                with patch.object(svc, '_write', write):
+                    await svc.handle(Request(json.dumps(modern_body()).encode(),
+                                             headers(token=KEY)))
+                self.assertEqual(replies[0].status, 503)
+                self.assertEqual(calls, [])
+                manager.values['listen_port'] = 8768
+                manager.future.set_result(True)
+                await asyncio.wait_for(task, 2)
+            self.assertTrue(made[0].stopped)
+            self.assertTrue(made[1].started)
+            self.assertEqual(svc.bound, ('127.0.0.1', 8768))
+            self.assertTrue(svc._serving)
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                await svc._reconcile()
+            self.assertEqual(len(made), 2)
+            self.assertIs(svc.pool, pool)
+        finally:
+            svc.close()
+
+    async def test_failed_writeback_closes_candidate(self):
+        manager = PersistManager()
+        svc = self.make(manager)
+        busy = {8767}
+        site, made = site_factory(lambda port: 'inuse' if port in busy else 'ok')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                task = asyncio.ensure_future(svc._reconcile())
+                self.assertTrue(await asyncio.to_thread(manager.requested.wait, 2))
+                manager.future.set_result(False)
+                await asyncio.wait_for(task, 2)
+            self.assertTrue(all(item.stopped for item in made))
+            self.assertIsNone(svc.site)
+            self.assertIsNone(svc.bound)
+            self.assertTrue(svc._serving)
+        finally:
+            svc.close()
+
+    async def test_cancelled_confirmation_closes_candidate(self):
+        manager = PersistManager()
+        svc = self.make(manager)
+        busy = {8767}
+        site, made = site_factory(lambda port: 'inuse' if port in busy else 'ok')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                task = asyncio.ensure_future(svc._reconcile())
+                self.assertTrue(await asyncio.to_thread(manager.requested.wait, 2))
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertTrue(all(item.stopped for item in made))
+            self.assertIsNone(svc.site)
+            self.assertTrue(manager.future.cancelled())
+            self.assertTrue(svc._serving)
+        finally:
+            svc.close()
+
+    async def test_inconsistent_family_ports_fail_closed(self):
+        manager = PersistManager()
+        svc = self.make(manager)
+        svc.runner = SimpleNamespace(addresses=[
+            ('127.0.0.1', 8767), ('::1', 8768)])
+
+        class Factory:
+            def __init__(self, runner, host, port):
+                self.port = port
+                self.stopped = False
+                made.append(self)
+
+            async def start(self):
+                pass
+
+            async def stop(self):
+                self.stopped = True
+
+        made = []
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=Factory)):
+                await svc._reconcile()
+            self.assertEqual(len(made), 1)
+            self.assertTrue(made[0].stopped)
+            self.assertIsNone(svc.site)
+            self.assertEqual(manager.requests, [])
+        finally:
+            svc.close()
+
+    async def test_invalid_address_fails_closed_without_binding(self):
+        manager = PersistManager(listen_host='')
+        svc = self.make(manager)
+        site, made = site_factory(lambda port: 'ok')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                await svc._reconcile()
+            self.assertEqual(made, [])
+            self.assertIsNone(svc.site)
+        finally:
+            svc.close()
 
 
 if __name__ == '__main__':

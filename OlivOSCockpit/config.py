@@ -4,6 +4,7 @@
 控制目录（含临时文件）由普通文件工具永久禁止访问，见 is_protected。
 """
 
+import concurrent.futures
 import hashlib
 import ipaddress
 import json
@@ -42,6 +43,7 @@ STOPPED = 'Configuration monitor stopped'
 PERMISSION_REAL_ACCOUNT_READ = 'real_account_read'
 PERMISSION_REAL_ACCOUNT_WRITE = 'real_account_write'
 PERMISSION_LOW_LEVEL_ACCESS = 'low_level_access'
+PERMISSION_PLUGIN_INSTALL = 'plugin_install'
 
 _KEY_RE = re.compile(r'OlivOS-[A-Za-z0-9]{32,64}\Z')
 _DIR_FLAGS = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0)
@@ -66,6 +68,7 @@ def config_template():
         'full_real_account_write': False,
         'full_low_level_access': False,
         'denied_paths': [],
+        'full_plugin_install': False,
     }
 
 
@@ -91,6 +94,7 @@ class Snapshot:
     error: str | None = None
     generation: int = 0
     fingerprint: str | None = None
+    full_plugin_install: bool = False
 
     @property
     def ready(self):
@@ -109,6 +113,10 @@ class Snapshot:
         if permission == PERMISSION_LOW_LEVEL_ACCESS:
             return (mode == MODE_FULL and self.full_real_account_write
                     and self.full_low_level_access)
+        if permission == PERMISSION_PLUGIN_INSTALL:
+            # 安装插件是新写入能力：Full 且已就绪，并同时具备真实写开关。
+            return (mode == MODE_FULL and self.ready and self.full_real_account_write
+                    and self.full_plugin_install)
         return False
 
 
@@ -234,6 +242,8 @@ def _config_values(data):
         'full_real_account_write': _boolean(data, 'full_real_account_write', False),
         'full_low_level_access': _boolean(data, 'full_low_level_access', False),
         'denied_paths': _strings(data, 'denied_paths', MAX_PATH_CHARS, MAX_DENIED_PATHS),
+        # 旧配置没有该键时按关闭处理；类型仍须是布尔值。
+        'full_plugin_install': _boolean(data, 'full_plugin_install', False),
     }
 
 
@@ -334,6 +344,44 @@ def _create_new(dir_fd, name, data):
     return True
 
 
+def _replace_file(dir_fd, name, data, expected_identity):
+    """用本进程临时 inode 原子替换已存在的配置；返回新身份或 None。
+
+    发布前复核源文件身份（尽力而为，不是跨进程 CAS），只删除自己创建
+    的临时文件；替换后重新读取并逐字节核验。临时文件 fsync 后才替换。
+    """
+    temp = _write_temp(dir_fd, name, data)
+    replaced = False
+    try:
+        try:
+            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError:
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != expected_identity:
+            return None
+        try:
+            os.replace(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError:
+            raise ConfigError('Configuration file is unavailable') from None
+        replaced = True
+    finally:
+        if not replaced:
+            try:
+                os.unlink(temp, dir_fd=dir_fd)
+            except OSError:
+                pass
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    raw, identity = _read_file(dir_fd, name)
+    if raw != data:
+        raise ConfigError('Configuration file could not be verified')
+    return identity
+
+
 def _child_dir(parent_fd, name, create):
     try:
         return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
@@ -380,6 +428,8 @@ class ConfigManager:
         self._tick_cb = None
         self._snapshot = Snapshot(valid=False, error=NOT_LOADED)
         self._published_key = (False, NOT_LOADED, None)
+        # 至多一个服务启动端口写回请求；由监督线程执行 I/O 并确认发布。
+        self._write_request = None
 
     def prepare(self):
         """初始化阶段只记录默认快照，不做 I/O。"""
@@ -410,11 +460,37 @@ class ConfigManager:
     def allowed(self, permission=None):
         return self.snapshot().allows(permission, self.mode)
 
+    def request_listen_port(self, port, expected_fingerprint):
+        """请求把实际监听端口写回配置；返回一次性 Future，或 None。
+
+        只接受当前有效且指纹一致的快照；同一时刻至多一个请求。写回与
+        两次观测确认都由监督线程完成，调用线程不做文件 I/O。
+        """
+        if (type(port) is not int or not 1 <= port <= 65535
+                or type(expected_fingerprint) is not str or not expected_fingerprint):
+            return None
+        future = concurrent.futures.Future()
+        with self._lock:
+            if self._stop.is_set() or self._write_request is not None:
+                return None
+            current = self._snapshot
+            if (not current.valid or not current.ready
+                    or current.fingerprint != expected_fingerprint):
+                return None
+            self._write_request = {
+                'port': port,
+                'expected': expected_fingerprint,
+                'future': future,
+                'state': 'pending',
+                'fingerprint': None,
+            }
+        return future
+
     def stop(self):
         """非阻塞撤权并停止：清 pending、快照失效且无 key、递增 generation。
 
         在自身锁内完成失效更新，停止后的迟到 commit/ready 不再发布；
-        stop 自己的失效更新不受停止 guard 拦截。
+        stop 自己的失效更新不受停止 guard 拦截。待写回请求在锁外结束。
         """
         with self._lock:
             self._stop.set()
@@ -423,6 +499,10 @@ class ConfigManager:
             self._snapshot = Snapshot(valid=False, error=STOPPED,
                                       generation=self._generation)
             self._published_key = (False, STOPPED, None)
+            request = self._write_request
+            self._write_request = None
+        if request is not None:
+            self._resolve(request, False)
 
     def refresh(self):
         """在调用线程执行一次有界轮询；监督线程也使用它。"""
@@ -443,6 +523,11 @@ class ConfigManager:
             except BaseException:
                 # 后台线程顶层兜底，不记录原始异常。
                 self._log('Configuration monitor failed safely.')
+            try:
+                self._process_write_request()
+            except BaseException:
+                # 写回失败只结束等待方；不记录原始异常。
+                self._log('Configuration update failed safely.')
             tick = self._tick_cb
             if tick is not None and not self._stop.is_set():
                 try:
@@ -514,6 +599,134 @@ class ConfigManager:
                     Snapshot(valid=False, error=VERIFYING, fingerprint=fingerprint))
         self._notify(published)
 
+    def _resolve(self, request, result):
+        """锁外完成 Future；等待方可能已取消或超时。"""
+        future = request.get('future') if type(request) is dict else None
+        if future is None:
+            return
+        try:
+            if not future.done():
+                future.set_result(result is True)
+        except BaseException:
+            pass
+
+    def _finish_write(self, request, result):
+        with self._lock:
+            if self._write_request is request:
+                self._write_request = None
+        self._resolve(request, result)
+
+    def _process_write_request(self):
+        """监督线程的写回接缝：先 refresh 观测，再处理至多一个请求。"""
+        with self._lock:
+            request = self._write_request
+            if request is None:
+                return
+            future = request['future']
+            if future.done():
+                self._write_request = None
+                return
+            state = request['state']
+        if self._stop.is_set():
+            self._finish_write(request, False)
+            return
+        try:
+            if state == 'pending':
+                self._write_port(request)
+            else:
+                self._confirm_write(request)
+        except BaseException:
+            self._finish_write(request, False)
+
+    def _write_port(self, request):
+        port = request['port']
+        expected = request['expected']
+        try:
+            dir_fd = self._control_fd(create=False)
+        except ConfigError:
+            self._finish_write(request, False)
+            return
+        try:
+            try:
+                config_raw, config_id = _read_file(dir_fd, CONFIG_NAME)
+                redaction_raw, redaction_id = _read_file(dir_fd, REDACTION_NAME)
+            except ConfigError:
+                self._finish_write(request, False)
+                return
+            current = _fingerprint((
+                (CONFIG_NAME, config_raw, config_id),
+                (REDACTION_NAME, redaction_raw, redaction_id),
+            ))
+            if current != expected:
+                # 人工编辑、删除或替换：不基于过期来源覆盖。
+                self._finish_write(request, False)
+                return
+            try:
+                data = _json(config_raw, 'Configuration')
+                values = _config_values(data)
+            except ConfigError:
+                self._finish_write(request, False)
+                return
+            if values['listen_port'] == port:
+                self._finish_write(request, False)
+                return
+            # 只改 listen_port；其他键、值和缺失的可选字段保持原样。
+            data['listen_port'] = port
+            try:
+                encoded = _encode(data)
+            except (TypeError, ValueError, UnicodeError):
+                self._finish_write(request, False)
+                return
+            if len(encoded) > MAX_FILE:
+                self._finish_write(request, False)
+                return
+            try:
+                _replace_file(dir_fd, CONFIG_NAME, encoded, config_id)
+            except ConfigError:
+                self._finish_write(request, False)
+                return
+            try:
+                published_raw, published_id = _read_file(dir_fd, CONFIG_NAME)
+                redaction_raw, redaction_id = _read_file(dir_fd, REDACTION_NAME)
+            except ConfigError:
+                self._finish_write(request, False)
+                return
+            if published_raw != encoded:
+                self._finish_write(request, False)
+                return
+            fingerprint = _fingerprint((
+                (CONFIG_NAME, published_raw, published_id),
+                (REDACTION_NAME, redaction_raw, redaction_id),
+            ))
+            with self._lock:
+                if self._write_request is not request or request['future'].done():
+                    return
+                request['state'] = 'written'
+                request['fingerprint'] = fingerprint
+        finally:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass
+
+    def _confirm_write(self, request):
+        with self._lock:
+            snapshot = self._snapshot
+            stopped = self._stop.is_set()
+        if stopped or snapshot is None:
+            self._finish_write(request, False)
+            return
+        if (snapshot.valid and snapshot.fingerprint == request['fingerprint']
+                and snapshot.listen_port == request['port']):
+            # 第二次一致观测已发布：端口进入策略，调用方可接受连接。
+            self._finish_write(request, True)
+            return
+        if (not snapshot.valid and snapshot.error == VERIFYING
+                and snapshot.fingerprint == request['fingerprint']):
+            # 第一次观测已撤权；等待第二次一致观测。
+            return
+        self._finish_write(request, False)
+
     def _control_fd(self, create):
         try:
             root_fd = fs.open_root(self.data_root)
@@ -577,8 +790,9 @@ class ConfigManager:
 
 
 __all__ = [
-    'CONFIG_NAME', 'CONTROL_DIR', 'ConfigError', 'ConfigManager', 'DEFAULT_BOT_ID',
-    'DEFAULT_HOST', 'DEFAULT_PORT', 'NAMESPACE_DIR', 'PERMISSION_LOW_LEVEL_ACCESS',
-    'PERMISSION_REAL_ACCOUNT_READ', 'PERMISSION_REAL_ACCOUNT_WRITE', 'REDACTION_NAME',
-    'Snapshot', 'config_template', 'control_dir', 'is_protected', 'redaction_template',
+    'CONFIG_NAME', 'CONTROL_DIR', 'ConfigError', 'ConfigManager', 'DEFAULT_HOST',
+    'DEFAULT_PORT', 'NAMESPACE_DIR', 'PERMISSION_LOW_LEVEL_ACCESS',
+    'PERMISSION_PLUGIN_INSTALL', 'PERMISSION_REAL_ACCOUNT_READ',
+    'PERMISSION_REAL_ACCOUNT_WRITE', 'REDACTION_NAME', 'Snapshot', 'config_template',
+    'control_dir', 'is_protected', 'redaction_template',
 ]

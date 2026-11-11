@@ -4,7 +4,8 @@
     "namespace": "OlivOSCockpit",
     "info": "独立的 OlivOS MCP 调试插件，含主动发送和整加载器重启能力。",
     "priority": 30000,
-    "version": "v0.1.0",
+    "version": "v0.2.0",
+    "svn": 1,
     "compatible_svn": 190,
     "message_mode": "olivos_string",
     "support": [

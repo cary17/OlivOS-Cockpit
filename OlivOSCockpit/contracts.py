@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-VERSION = 'v0.1.0'
+VERSION = 'v0.2.0'
 NAMESPACE = 'OlivOSCockpit'
 SERVER_INFO = {'name': 'OlivOS-Cockpit', 'version': VERSION}
 MAX_BODY = 1024 * 1024

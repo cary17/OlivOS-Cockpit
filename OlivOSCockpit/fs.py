@@ -43,10 +43,12 @@ def require():
 class _FD(int):
     """fd 自携策略和路径身份；os.close 原样可用，不建立全局 fd 表。"""
 
-    def __new__(cls, fd, context, path):
+    def __new__(cls, fd, context, path, roots=None):
         value = super().__new__(cls, fd)
         value.context = context
         value.path = path
+        # 受信包根可位于 cwd 之外；后续相对打开沿用同一授权根，不接受请求扩根。
+        value.roots = None if roots is None else tuple(roots)
         info = os.fstat(fd)
         value.identity = (info.st_dev, info.st_ino)
         return value
@@ -63,7 +65,7 @@ def _within(path, root):
     return os.path.commonpath((path, root)) == root
 
 
-def _path_policy(context, path, write=False):
+def _path_policy(context, path, write=False, roots=None):
     """先判路径、后做 I/O；拒绝项只收紧可信根，不能扩根。"""
     path = _absolute(path)
     if context is None:  # 仅配置管理器等受信内部入口和纯原语测试使用。
@@ -72,11 +74,15 @@ def _path_policy(context, path, write=False):
         return path
     from . import config, host
 
-    roots = []
-    for value in (getattr(context, 'root', None), getattr(context, 'data_root', None)):
-        if value:
-            roots.append(_absolute(value))
-    if not roots or not any(_within(path, root) for root in roots):
+    trusted = []
+    if roots is not None:
+        # 仅由 package_root() 从宿主插件 API 解析；不是 MCP 参数。
+        trusted.extend(_absolute(value) for value in roots)
+    else:
+        for value in (getattr(context, 'root', None), getattr(context, 'data_root', None)):
+            if value:
+                trusted.append(_absolute(value))
+    if not trusted or not any(_within(path, root) for root in trusted):
         raise ToolError('Path is outside the trusted OlivOS roots')
     data_root = getattr(context, 'data_root', None)
     if not data_root or config.is_protected(data_root, path):
@@ -164,7 +170,8 @@ def _check_fd(fd):
         _kind(info, context)
         if not isinstance(fd, _FD):
             return info
-        path = _path_policy(context, fd.path)
+        roots = getattr(fd, 'roots', None)
+        path = _path_policy(context, fd.path, roots=roots)
         if fd.identity != (info.st_dev, info.st_ino):
             raise ToolError('Path identity changed')
         check = _walk(path)
@@ -182,12 +189,49 @@ def _check_fd(fd):
 
 def open_root(root, context=None):
     """逐组件 O_NOFOLLOW 打开可信根；context 随派生 fd 传递。"""
+    return _open_root(root, context, None)
+
+
+def package_root(context):
+    """从宿主插件 API 解析包根；绝对路径直接使用，相对路径按捕获的 cwd 解析。
+
+    缺失或非法一律安全失败，不按部署形态猜测目录。
+    """
+    if context is None:
+        raise ToolError('Plugin package root is unavailable')
+    try:
+        olivos = getattr(context, 'olivos', None)
+        plugin_api = getattr(olivos, 'pluginAPI', None) if olivos is not None else None
+        value = getattr(plugin_api, 'plugin_path', None) if plugin_api is not None else None
+    except BaseException:
+        raise ToolError('Plugin package root is unavailable') from None
+    if type(value) is not str or not value or '\x00' in value:
+        raise ToolError('Plugin package root is unavailable')
+    if os.path.isabs(value):
+        root = os.path.normpath(value)
+    else:
+        base = getattr(context, 'root', None)
+        if type(base) is not str or not os.path.isabs(base) or '\x00' in base:
+            raise ToolError('Plugin package root is unavailable')
+        root = os.path.normpath(os.path.join(base, value))
+    if not os.path.isabs(root) or '\x00' in root:
+        raise ToolError('Plugin package root is unavailable')
+    return root
+
+
+def open_package_root(context):
+    """打开宿主声明的包根；根来源于宿主上下文，后续相对路径不扩根。"""
+    root = package_root(context)
+    return _open_root(root, context, (root,))
+
+
+def _open_root(root, context, roots):
     require()
-    root = _path_policy(context, root)
+    root = _path_policy(context, root, roots=roots)
     fd = None
     try:
         fd = _walk(root, directory=True)
-        result = _FD(fd, context, root)
+        result = _FD(fd, context, root, roots)
         _check_fd(result)
         fd = None
         return result
@@ -198,9 +242,7 @@ def open_root(root, context=None):
             os.close(fd)
 
 
-def open_rel(dir_fd, rel):
-    """相对 dir_fd 打开；返回 (fd, 'file'|'dir')，保留策略及绝对路径身份。"""
-    require()
+def _relative_names(rel):
     if type(rel) is not str or '\x00' in rel or '\\' in rel:
         raise ToolError('Invalid path')
     if rel.startswith('/') or (len(rel) > 1 and rel[1] == ':'):
@@ -208,11 +250,31 @@ def open_rel(dir_fd, rel):
     parts = rel.split('/')
     if '..' in parts:
         raise ToolError('Parent components are not allowed')
-    names = [part for part in parts if part not in ('', '.')]
+    return [part for part in parts if part not in ('', '.')]
+
+
+def authorize_rel(dir_fd, rel, write=False):
+    """不要求目标存在：只校验相对路径与当前策略，返回绝对路径供调用方发布。"""
+    require()
+    names = _relative_names(rel)
     context = getattr(dir_fd, 'context', None)
     path = None
     if isinstance(dir_fd, _FD):
-        path = _path_policy(context, os.path.join(dir_fd.path, *names))
+        path = _path_policy(context, os.path.join(dir_fd.path, *names), write=write,
+                            roots=getattr(dir_fd, 'roots', None))
+    _check_fd(dir_fd)
+    return path
+
+
+def open_rel(dir_fd, rel):
+    """相对 dir_fd 打开；返回 (fd, 'file'|'dir')，保留策略及绝对路径身份。"""
+    require()
+    names = _relative_names(rel)
+    context = getattr(dir_fd, 'context', None)
+    roots = getattr(dir_fd, 'roots', None)
+    path = None
+    if isinstance(dir_fd, _FD):
+        path = _path_policy(context, os.path.join(dir_fd.path, *names), roots=roots)
     _check_fd(dir_fd)
     fd = None
     try:
@@ -227,7 +289,7 @@ def open_rel(dir_fd, rel):
             fd = nxt
         info = os.fstat(fd)
         kind = _kind(info, context)
-        result = _FD(fd, context, path) if path is not None else fd
+        result = _FD(fd, context, path, roots) if path is not None else fd
         _check_fd(result)
         opened = result, kind
         fd = None
@@ -239,13 +301,15 @@ def open_rel(dir_fd, rel):
             os.close(fd)
 
 
-def list_dir(dir_fd, limit=MAX_ENTRIES):
-    """最多读 limit+1 条目录项，不排序、不 collect 全部。返回 (entries, truncated)。"""
+def _list(dir_fd, limit, audit):
+    """最多读 limit+1 条目录项；audit 模式额外报告被策略隐藏的条目数。"""
     _check_fd(dir_fd)
     entries = []
     seen = 0
+    blocked = 0
     truncated = False
     context = getattr(dir_fd, 'context', None)
+    roots = getattr(dir_fd, 'roots', None)
     try:
         with os.scandir(dir_fd) as iterator:
             for entry in iterator:
@@ -255,11 +319,15 @@ def list_dir(dir_fd, limit=MAX_ENTRIES):
                     break
                 try:
                     if isinstance(dir_fd, _FD):
-                        _path_policy(context, os.path.join(dir_fd.path, entry.name))
+                        _path_policy(context, os.path.join(dir_fd.path, entry.name), roots=roots)
                     info = entry.stat(follow_symlinks=False)
                     if context is not None and stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+                        if audit:
+                            blocked += 1
                         continue
                 except (ToolError, OSError):
+                    if audit:
+                        blocked += 1
                     continue
                 if stat.S_ISREG(info.st_mode):
                     kind = 'file'
@@ -274,7 +342,22 @@ def list_dir(dir_fd, limit=MAX_ENTRIES):
     except OSError:
         raise ToolError('Directory is unavailable') from None
     _check_fd(dir_fd)
+    return entries, truncated, blocked
+
+
+def list_dir(dir_fd, limit=MAX_ENTRIES):
+    """最多读 limit+1 条目录项，不排序、不 collect 全部。返回 (entries, truncated)。"""
+    entries, truncated, _ = _list(dir_fd, limit, False)
     return entries, truncated
+
+
+def scan_dir(dir_fd, limit=MAX_ENTRIES):
+    """审计式枚举：返回 (entries, truncated, blocked)；不暴露被隐藏条目的名称。
+
+    安装前的同名 namespace 扫描必须知道目录是否完整，因此被拒绝或无法 stat
+    的条目按 blocked 计数，由调用方 fail-closed。
+    """
+    return _list(dir_fd, limit, True)
 
 
 def read_fd(fd, limit=MAX_FILE):

@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from dataclasses import replace
@@ -21,6 +22,10 @@ class Manager:
 
     def snapshot(self):
         return self.current
+
+
+def host_stub(plugin_path='./plugin/app/'):
+    return types.SimpleNamespace(pluginAPI=types.SimpleNamespace(plugin_path=plugin_path))
 
 
 class PathPolicyTests(unittest.TestCase):
@@ -41,7 +46,8 @@ class PathPolicyTests(unittest.TestCase):
         self.logs = self.root / 'logfile'
         self.logs.mkdir()
         self.manager = Manager(redaction_enabled=False, full_real_account_write=True)
-        self.ctx = contracts.Context(None, str(self.root), str(self.data), config=self.manager)
+        self.ctx = contracts.Context(None, str(self.root), str(self.data),
+                                     olivos=host_stub(), config=self.manager)
 
     def fd(self, path=None):
         fd = fs.open_root(str(path or self.root), context=self.ctx)
@@ -199,6 +205,30 @@ class PathPolicyTests(unittest.TestCase):
         unpacked.mkdir()
         os.link(secret, unpacked / 'app.json')
         self.assertEqual(files.cockpit_plugins(self.ctx, {}).data['plugins'], [])
+
+    def test_package_root_comes_from_host_path_not_client_or_cwd(self):
+        self.package(self.app / 'Demo.opk', 'Demo')
+        self.assertEqual(files.cockpit_plugins(self.ctx, {}).data['plugins'][0]['filename'],
+                         'Demo.opk')
+        # 宿主声明的绝对包根可位于运行 cwd 之外，仍受同一策略与包根身份约束。
+        outside = tempfile.TemporaryDirectory(prefix='cockpit-package-root-')
+        self.addCleanup(outside.cleanup)
+        external = Path(os.path.realpath(outside.name)) / 'app'
+        external.mkdir()
+        self.package(external / 'Outside.opk', 'Outside')
+        ctx = replace(self.ctx, olivos=host_stub(str(external)))
+        plugins = files.cockpit_plugins(ctx, {}).data['plugins']
+        self.assertEqual([item['filename'] for item in plugins], ['Outside.opk'])
+        # 缺能力或根为符号链接时安全失败，不猜目录。
+        with self.assertRaises(contracts.ToolError):
+            files.cockpit_plugins(replace(self.ctx, olivos=None), {})
+        link = Path(os.path.realpath(outside.name)) / 'link'
+        link.symlink_to(external, target_is_directory=True)
+        with self.assertRaises(contracts.ToolError):
+            files.cockpit_plugins(replace(self.ctx, olivos=host_stub(str(link))), {})
+        self.deny(str(external))
+        with self.assertRaises(contracts.ToolError):
+            files.cockpit_plugins(ctx, {})
 
     def test_manifest_and_package_scans_hide_denied_names_and_metadata(self):
         self.package(self.app / 'Hidden.opk', 'Hidden')

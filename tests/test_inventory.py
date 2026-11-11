@@ -91,8 +91,8 @@ class InventoryTests(unittest.TestCase):
 
     def test_readme_counts_match_registries(self):
         readme = (ROOT / 'README.md').read_text('utf-8')
-        self.assertIn(f'| `OlivOSCockpit-v0.1.0.opk` | {len(registry.TOOLS)} |', readme)
-        self.assertIn(f'| `OlivOSCockpitLite-v0.1.0.opk` | {len(self.lite_tools)} |', readme)
+        self.assertIn(f'| `OlivOSCockpit-<version>.opk` | {len(registry.TOOLS)} |', readme)
+        self.assertIn(f'| `OlivOSCockpitLite-<version>.opk` | {len(self.lite_tools)} |', readme)
 
 
 if __name__ == '__main__':

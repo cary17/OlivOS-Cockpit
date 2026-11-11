@@ -9,7 +9,7 @@ import unittest
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-RELEASE = 'v0.1.0'
+RELEASE = 'v0.2.0'
 _spec = importlib.util.spec_from_file_location('build_opk', ROOT / 'scripts' / 'build_opk.py')
 builder = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(builder)
@@ -30,7 +30,7 @@ class BuildTests(unittest.TestCase):
                     expected.discard('catalog_tools.py')
                     if lite:
                         expected -= {'full_only.py', 'adapter_tools.py', 'file_write.py',
-                                     'account_write.py', 'intercept.py'}
+                                     'account_write.py', 'intercept.py', 'plugin_install.py'}
                     self.assertTrue(expected <= names, expected - names)
                     self.assertIn('app.json', names)
                     self.assertIn('__init__.py', names)
@@ -44,10 +44,11 @@ class BuildTests(unittest.TestCase):
                     self.assertEqual(manifest['namespace'], 'OlivOSCockpit')
                     self.assertEqual(manifest['version'], RELEASE)
                     self.assertEqual(manifest['compatible_svn'], 190)
-                    self.assertNotIn('svn', manifest)
+                    self.assertEqual(manifest['svn'], 1)
                     self.assertEqual('full_only.py' in names, not lite)
                     self.assertEqual('adapter_tools.py' in names, not lite)
-                    for module in ('file_write.py', 'account_write.py', 'intercept.py'):
+                    for module in ('file_write.py', 'account_write.py', 'intercept.py',
+                                   'plugin_install.py'):
                         self.assertEqual(module in names, not lite)
                     self.assertNotIn('catalog_tools.py', names)
                     for module in ('config.py', 'raw.py', 'read_tools.py', 'account_tools.py'):
@@ -103,10 +104,10 @@ class BuildTests(unittest.TestCase):
             'skills/olivos-cockpit/SKILL.md': ROOT / 'skills' / 'olivos-cockpit' / 'SKILL.md',
         }
         cases = (
-            ('OlivOSCockpit/app.json', '"version": "v0.1.0"', '"version": "v0.1.1"'),
-            ('OlivOSCockpit/app.json', '"version": "v0.1.0"', '"version": "0.1.0"'),
-            ('OlivOSCockpit/contracts.py', "VERSION = 'v0.1.0'", "VERSION = 'v0.1.1'"),
-            ('skills/olivos-cockpit/SKILL.md', 'version: v0.1.0', 'version: v0.1.1'),
+            ('OlivOSCockpit/app.json', '"version": "v0.2.0"', '"version": "v0.2.1"'),
+            ('OlivOSCockpit/app.json', '"version": "v0.2.0"', '"version": "0.2.0"'),
+            ('OlivOSCockpit/contracts.py', "VERSION = 'v0.2.0'", "VERSION = 'v0.2.1'"),
+            ('skills/olivos-cockpit/SKILL.md', 'version: v0.2.0', 'version: v0.2.1'),
         )
         for relative, old, new in cases:
             with self.subTest(relative=relative, replacement=new), \
@@ -175,7 +176,7 @@ with tempfile.TemporaryDirectory() as directory:
     lite = mode == 'lite'
     assert ('OlivOSCockpit.full_only' in sys.modules) == (not lite)
     assert ('OlivOSCockpit.adapter_tools' in sys.modules) == (not lite)
-    for full_module in ('file_write', 'account_write', 'intercept'):
+    for full_module in ('file_write', 'account_write', 'intercept', 'plugin_install'):
         assert ('OlivOSCockpit.' + full_module in sys.modules) == (not lite)
     assert 'OlivOSCockpit.catalog_tools' not in sys.modules
     assert {tool.name for tool in read_tools.TOOLS + account_tools.TOOLS} <= names
@@ -186,11 +187,15 @@ with tempfile.TemporaryDirectory() as directory:
         assert 'cockpit_accounts_update' not in names
         assert 'cockpit_plugin_file_update' not in names
         assert 'cockpit_intercept_rules' not in names
+        assert 'cockpit_plugin_install' not in names
+        assert not hasattr(module.registry, 'tick')
         assert {tool.name for tool in raw_tools.TOOLS} <= names
     else:
         assert getattr(module.registry, 'MODE', MODE_FULL) == MODE_FULL
         assert FULL_ONLY <= names
         assert 'cockpit_milky_send_group' in names
+        assert 'cockpit_plugin_install' in names
+        assert callable(getattr(module.registry, 'tick', None))
     # 运行数据根：模板由 ConfigManager 首次刷新创建，无 key 不监听。
     data_root = str(base / 'plugin' / 'data')
     Path(data_root).mkdir(parents=True, exist_ok=True)

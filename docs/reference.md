@@ -2,7 +2,7 @@
 
 本文件承接协议接入、工具行为、安全机制与失败边界的完整说明；README 面向真人使用者的安装、配置、风险提示与许可，[配套 skill](../skills/olivos-cockpit/SKILL.md) 指导 agent 使用全部已发布功能，[AGENTS.md](../AGENTS.md) 面向开发 agent。文档与实现不一致时，以源码为准并顺手更正文档。
 
-当前静态审阅基线：OlivOS Release 1.0.2-beta.3，commit [`c6a99fc2a3b4`](https://github.com/OlivOS-Team/OlivOS/tree/c6a99fc2a3b4cc7dd1ea8e7b6fe762b7bee7c7d4)；本插件与配套 skill 均为 `v0.1.0`，无插件自身 SVN 版本。每次源码开发的最新上游选择流程见 [AGENTS.md §8.0](../AGENTS.md#80-开发前识别最新上游源码)，不将此历史台账自动重标为新版本。
+当前静态审阅基线：OlivOS Release 1.0.2-beta.3，commit [`c6a99fc2a3b4`](https://github.com/OlivOS-Team/OlivOS/tree/c6a99fc2a3b4cc7dd1ea8e7b6fe762b7bee7c7d4)；Full/Lite 两个 OPK 与配套 skill 使用同一发布版本。`OlivOSCockpit/app.json` 的整数 `svn` 是插件自身清单字段，`compatible_svn` 是独立的宿主兼容闸门，二者不互相推导。每次源码开发的最新上游选择流程见 [AGENTS.md §8.0](../AGENTS.md#80-开发前识别最新上游源码)，不将此历史台账自动重标为新版本。
 
 ## 1. 接口台账（interfaces.json）
 
@@ -79,6 +79,23 @@ Full/Lite 的现有真实数据读权限、路径拒绝与全部资源预算保�
 
 JSON 另做严格解析与解码前结构预算。不保证目标插件自动重载配置。异常残留的 `.cockpit-*.tmp` 名称不能证明归属；插件不做启动期或后台清扫，只对本次仍持有 fd 且身份匹配的暂存尽力清理。注意：账号存档更新会把完整存档写入暂存文件（含已有凭据），崩溃残留可能是额外敏感副本。
 
+### 插件安装与更新（cockpit_plugin_install，仅 Full）
+
+`cockpit_plugin_install` 是普通文件写入禁令的专用窄例外，只用于在宿主插件包根内安装或替换 OPK。它需要 `full_real_account_write` 与独立的 `full_plugin_install` 同时开启；后者默认 `false`，旧配置缺少该字段仍有效。Lite 在构建时物理剔除安装实现，不通过运行时开关隐藏。
+
+动作与边界：
+
+- 每个请求用必填 `operation` 选择 `begin` / `write` / `commit` / `cancel`，分步接收一个完整包。`begin` 必填 `filename`（纯 `.opk` 文件名，1..255 字符；拒绝 Cockpit/OlivOS 包）、`namespace`（1..64 安全 ASCII Python 标识符，须与根 `app.json` 一致；拒绝 Cockpit/OlivOS namespace）与 `size`（1..8388608），返回 `upload_id`、`offset: 0`、`max_chunk_bytes: 524288` 与 `expires_in_seconds: 300`；`write` 必填 `upload_id`、`offset`（须等于已接收字节数）与严格 base64 的 `chunk`（解码后 1..524288 字节，编码 ≤699052 字符）；`commit` 必填 `upload_id` 与 `sha256`；`cancel` 必填 `upload_id`。单包 ≤8 MiB。全局同时最多一个待上传包，固定 5 分钟过期，并绑定请求 owner 与配置代次。过期、撤销或 `cancel` 会关闭候选；同 owner 的 offset/base64/超限等写入参数错误可能保留原上传，应从原 offset 续传或同 owner `cancel` 后重新 `begin`；其他 owner 的请求只被拒绝，不清除持有者的上传；撤权或归属/代次变化由监督 tick 清除。通过会话与归属校验的 `commit` 会消费该上传（含安装失败）；在外层 schema、参数格式或会话校验阶段即被拒绝的 `commit` 可能保留。结果不确定（超时/断线/核验失败）时不重放。
+- 服务端目标根是宿主 `OlivOS.pluginAPI.plugin_path`，相对初始化上下文根解析；MCP 请求不能传任意绝对路径、扩根或访问控制目录。支持新 `namespace` 安装和**同 namespace 覆盖**；拒绝路径外目标、宿主源码、本插件控制数据与 Cockpit 自身包。
+- 同 namespace 覆盖**明确允许，不需要 `expected_sha256`、旧包 SHA-256、替代的旧内容修订门槛或 force 开关**（这里的 `expected_sha256` 指旧内容前提；`commit.sha256` 是本次新包摘要，见下）。旧包可能因此被替换丢失；多个外部写入方应由使用者协调，服务端不保证跨进程 compare-and-swap。普通文件与账号存档更新的 `expected_sha256` 规则不受影响。
+- `commit` 必须携带客户端计算的本次**新包**完整 SHA-256（64 位十六进制），服务端用它核对上传字节并在落盘后核验最终内容，不匹配即拒绝；成功结果返回同一新包 SHA-256、`persisted`、`durability`、`replaced` 与 `loaded: false` 供结果核验。该要求只针对新包，不是旧包前提。提交前还校验 ZIP 结构、目标身份与边界，通过后才持久化。
+- 官方包格式为 ZIP 根部直接放置插件目录内容（`app.json`、`__init__.py`、`main.py` 及 `resources` 等），不套外层文件夹，`app.json` 为 UTF-8 无 BOM。已有 `.opk` 保持字节不变；从源码打包时不得导入或执行被安装源码/构建脚本，并排除本地密钥、VCS、缓存、虚拟环境和构建产物。客户端是否需要 OlivOS 取决于其本地打包方式，服务端不要求客户端安装 OlivOS。实现复用现有 MCP 上传与标准库 ZIP，不引入通用 HTTP 客户端或新依赖。
+- 服务端只处理 MCP 上传的字节，不读取客户端本地路径；客户端本地文件读取/打包权限属于客户端环境，与服务端路径权限无关。agent 不应声称远端读取了客户端文件，也不应把完整 base64 包体粘贴到对话中。
+- 上传只完成持久化与校验，**不自动重载或启用插件**。需要加载器重载时，`cockpit_reload` 是另一项需要用户明确授权的整加载器操作，不是单插件热重载；否则由使用者安排宿主重启。
+- 结构校验不是沙箱：被安装代码在后续加载时以宿主进程权限执行，包括宿主自动策略或外部操作触发的重启。
+
+提交结果不确定（超时、断线、核验失败）时不自动重放 `commit` 或重新上传；先重新读取安装元数据与日志判断实际状态，再取得新的用户授权。
+
 ### 插件配置数据库（cockpit_plugin_config_set）
 
 经宿主现有 `set_config(..., pkl=False)` 写入配置数据库。仅支持无损 SQLite/JSON 标量（null、布尔、63-bit 范围整数、有限浮点和 ≤64 KiB 字符串），不接收列表/字典、SQL、pickle 或文件路径。自身 namespace 永久拒绝，已知数据库路径也必须通过路径策略；该预检不能给宿主内部数据库连接增加目录 fd 级竞态保护。
@@ -138,6 +155,7 @@ Cockpit 的发现与维护全部只读：
 - 只允许各资源根内的普通文件和目录，拒绝路径穿越、绝对路径、特殊文件（FIFO/设备/socket）及检查与打开之间的链接替换。
 - 单次日志扫描 ≤8 MiB、返回 ≤2000 行；单次文件源读取 ≤1 MiB；目录 ≤500 条；单请求体与最终 JSON 响应各 ≤1 MiB。超限结果标记截断或安全失败，不截断已编码的 JSON 字节。
 - OPK 最多读取 8 MiB 快照，在 `ZipFile` 构造前校验实际中央目录 ≤256 KiB / 1024 项，拒绝有歧义的 EOCD 注释；拒绝 ZIP64、多卷、加密包与重复清单；只读取 ≤64 KiB 的 `app.json`，不 `extractall`。
+- 安装上传单包 ≤8 MiB；原始分块 ≤512 KiB（base64 ≤699052 字符）；全局同时最多一个待上传，固定 5 分钟过期，绑定 owner 与配置代次。过期、撤销或取消关闭候选；同 owner 的 offset/base64/超限参数错误可能保留已接收字节，其他 owner 的请求只失败、不清除持有者上传。不保留日志或响应正文缓存。
 - `cockpit_plugins` 按逐条记录的紧凑 ASCII JSON 字节累计聚合预算（响应上限的 1/4），可能早于 500 条截断并标记；文件名和错误记录同样计入，单包 `cockpit_meta` 不因此截短字段。
 - **两套独立 8 名额**：所有 HTTP 请求（含 ping/tools/list）占入口名额，满额立即 503；`tools/call` 另占 worker 名额，超时释放 HTTP 等待不代表尚未结束的 worker 名额已归还。等待预算 10 秒；超时或取消只结束等待，未结束的调用继续占用名额，不补开线程；不会撤销已提交的发送或重启。**写操作超时后不要自动重试**。
 - `cockpit_raw_events` 缓存 ≤256 条、单条 ≤64 KiB、总量 ≤4 MiB、保留 5 分钟；单次返回最多 8 条且 ASCII JSON 合计 ≤256 KiB；裁剪、预算丢弃及采集锁竞争都会标记不完整。意外读取故障返回固定安全工具错误，不伪装正常空快照；服务侧取消继续传播。
@@ -151,6 +169,7 @@ Cockpit 的发现与维护全部只读：
 - 同一加载器重复初始化且 Proc、路径根、OlivOS 引用与未停止 manager 均未改变时，复用原冻结 Context；来源变化会撤销旧 manager 并建立新 owner，不原地改写在途请求使用的路径字段。新监督目标先登记，旧监督循环退出后接替；旧回调不能用迟到结果覆盖新 owner 的待启动状态。
 - 旧服务或 worker 尚未退尽时保留有限待接替目标，不另建池；健康 tick 不重复 apply/reconcile。服务创建前有唯一启动占位，发布前重新检查 manager 停止/快照失效；失败候选也要关闭并等待 worker 退尽。关闭的池不再接收新任务。旧 refresh 或 SDK 阻塞可能无限期延后接替，不承诺一个轮询周期内恢复。
 - `request_stop` 先经 close/_closed 记住停止并关闭提交门，再通知 loop；loop 尚未发布也不丢失停止意图。首轮与后续配置重绑共用同一调度入口，同一服务峰值最多一个 reconcile，正常配置热更新不重建池。
+- `8767` 只是默认示例。绑定遇到地址占用时，在有限范围内依次尝试后续正整数端口，IPv4/IPv6 使用同一个实际端口；用户配置端口 0 被拒绝。只有真实绑定成功后，manager 才把 `listen_port` 写回 `config.json`，其余本地配置保持不变；自动写回不保证与并发外部编辑构成 compare-and-swap。候选绑定失败或配置已过期时关闭候选，实际端点写入监听成功日志，客户端必须据此更新 URL；使用者也可查看本地 `config.json` 的 `listen_port`，但不要通过 MCP 读取该控制文件。
 - 配置代次在请求开始与响应写出之间变化时：已成功接受的通知保留 202 空正文；错误响应保留既有 HTTP 状态、头与已知 Reject 错误码；普通有 id 的工具成功结果被替换为固定安全错误且 `after_send` 不执行。
 - 会话有效性与协商版本在单锁内一次查询；过期、淘汰或 key 轮换都按未知会话返回 404。
 - 旧的固定地址入口 `service.start(...)` 已**显式弃用**（2026-11-08）：保留同名签名以便导入兼容，但调用即返回固定 `ToolError`，不再建池或监听。它没有配置快照，服务级放行与 handler 内代次/授权复核相互矛盾；请改用配置驱动的 `apply_config` / `start_managed` 入口。这是外部兼容性变化，依赖旧入口的仓库外调用方必须迁移。
@@ -158,7 +177,7 @@ Cockpit 的发现与维护全部只读：
 
 ### 客户端接入
 
-默认端点为 `http://127.0.0.1:8767/mcp`（随 `listen_host` / `listen_port` 变化），通过 Streamable HTTP 的 POST 请求接入。请求头包括：
+默认端点为 `http://127.0.0.1:8767/mcp`，其中 8767 只是示例默认值；实际端点随 `listen_host` / `listen_port` 变化，端口回退后以监听成功日志中的真实绑定端口为准；使用者也可查看本地 `config.json` 的 `listen_port`，但不要通过 MCP 读取该控制文件。通过 Streamable HTTP 的 POST 请求接入。请求头包括：
 
 ```text
 Authorization: Bearer <config.json 中的 api_key>
@@ -211,6 +230,10 @@ Accept: application/json, text/event-stream
 | `503` | 并发名额满（入口与 worker 是两套独立 8 名额），立即返回不排队 |
 | `408` | 请求体读取超时 |
 | 游标失效 | `cockpit_data` 续读游标 5 分钟过期，或文件修订/清洗上下文/配置代次变化：从头重新读取 |
+| 端口回退 | 连接 `8767` 失败不代表服务未启动；读取监听成功日志中的实际端口后更新客户端 URL；本机也可查看 `config.json` 的 `listen_port`，不通过 MCP 读取控制文件 |
+| 安装上传失效 | 待上传包过期、被撤销或被取消：候选已关闭，重新 `begin`，不复用旧状态；归属/代次变化由监督 tick 清除 |
+| 安装写入被拒 | 其他 owner 的请求不清除持有者上传；同 owner 的 offset/base64/超限参数错误可能保留已接收字节，从原 offset 续传或同 owner `cancel` 后重新 `begin` |
+| 安装结果未知 | `commit` 超时/断线/核验失败：不自动重放；先读安装元数据与日志，再取得新授权 |
 | 写超时 | 调用可能仍在执行且占用名额：**不要自动重试**，先读回状态 |
 
 工具自身失败用 `isError: true` 表示，不是 JSON-RPC 协议错误。

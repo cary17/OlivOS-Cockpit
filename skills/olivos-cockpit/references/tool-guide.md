@@ -13,6 +13,7 @@
 | `cockpit_account_type_catalog` | 无 | 宿主声明的账号类型，不是当前账号清单 |
 | `cockpit_accounts_schema` | 无 | 账号输入 schema，不读取现有凭据 |
 | `cockpit_accounts_validate` | account | 对给定账号配置做校验，不创建账号、不证明能连接；不要求用户把凭据贴到对话 |
+| `cockpit_plugin_install` | `operation`（begin/write/commit/cancel）及各动作字段，以现场 schema 为准 | 仅 Full，需 `full_real_account_write` 与 `full_plugin_install` 双开关；安装/覆盖 OPK；服务端只收 MCP 上传字节，不读客户端本地路径；不自动重载 |
 
 示例（目标 namespace 须来自实际安装清单）：
 
@@ -90,3 +91,12 @@ schema 校验通过不等于适配器查询成功；原生查询返回 unsupport
 ```
 
 该例仅供已经具备相应授权的底层诊断任务使用；取到空数组也需检查截断和采样语义，不把它等同于原子快照中的“全局没有账号”。
+
+## 5. 插件安装（仅 Full）
+
+`cockpit_plugin_install` 的每个请求都用必填 `operation` 选择 `begin` → `write` → `commit`，放弃时 `cancel`；逐字段以现场 schema 为准。`begin` 传 `filename`、`namespace`、`size` 并取得 `upload_id`；`write` 传 `upload_id`、`offset` 与严格 base64 的 `chunk`；`commit` 传 `upload_id` 与新完整包的 64 位十六进制 `sha256`；`cancel` 传 `upload_id`。单包 ≤8 MiB，原始分块 ≤512 KiB（base64 ≤699052 字符），同时只允许一个待上传，固定 5 分钟过期并绑定 owner/配置代次。
+
+- 服务端目标根仅宿主 `OlivOS.pluginAPI.plugin_path`，只接受上传字节；客户端本地路径不会因此可读。不要粘贴完整 base64 包体。
+- 同 namespace 覆盖是允许的正常操作，不需要旧包 SHA-256、旧修订门槛或 force 开关；旧包可能丢失，外部写入方由用户协调。
+- 已有 `.opk` 保持字节；从源码打包时 ZIP 根部直接放插件目录内容，无外层文件夹，`app.json` UTF-8 无 BOM，排除密钥/VCS/缓存/虚拟环境/构建产物，不执行被安装源码或构建脚本。
+- `commit` 的 `sha256` 必须是本次新完整包的摘要，供服务端校验上传字节与最终落盘内容；不匹配拒绝，成功结果返回同一值供核验。它是新包要求，不是旧包前提；同 namespace 覆盖不需要旧包 SHA-256、旧修订门槛或 force。结果未知不要重放。安装成功不代表已加载：`cockpit_reload` 是单独授权的整加载器动作，不是单插件热重载。结构校验不是沙箱。

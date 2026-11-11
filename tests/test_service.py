@@ -2,11 +2,14 @@
 
 import asyncio
 import hashlib
+import http.client
 import json
 import os
+import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -35,9 +38,36 @@ except BaseException:  # pragma: no cover - 本机无 aiohttp 时跳过
     web = None
 
 TOKEN = 'test-token'
+VALID_KEY = 'OlivOS-' + 'A' * 16 + 'b' * 8 + '1' * 8
 CONTEXT = Context(None, '/unused', '/unused/data')
 INIT_PARAMS = {'protocolVersion': '2025-06-18', 'capabilities': {},
                'clientInfo': {'name': 'client', 'version': '1.0'}}
+
+
+def wait_until(predicate, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if predicate():
+                return True
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.02)
+    return False
+
+
+def http_json(port, body, extra=None, token=TOKEN):
+    headers = {'Authorization': 'Bearer ' + token,
+               'Content-Type': 'application/json',
+               'Accept': 'application/json, text/event-stream'}
+    headers.update(extra or {})
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+    try:
+        connection.request('POST', '/mcp', body=json.dumps(body), headers=headers)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
 
 
 def gate_tools(entered=None, release=None):
@@ -906,6 +936,198 @@ class DataPaginationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((before.st_ino, before.st_size), (after.st_ino, after.st_size))
         rejected, _ = await self.read(path.name, cursor)
         self.assertTrue(rejected['isError'])
+
+
+@unittest.skipUnless(web is not None, 'aiohttp unavailable')
+class ManagedPortFallbackTests(unittest.TestCase):
+    """真实监听：配置端口被占用→有界回退→写回配置→两时代 HTTP 可用。"""
+
+    def test_occupied_port_falls_back_persists_and_serves_both_eras(self):
+        temp = tempfile.TemporaryDirectory(prefix='cockpit-managed-')
+        self.addCleanup(temp.cleanup)
+        data_root = os.path.join(temp.name, 'data')
+        os.makedirs(data_root)
+
+        occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(('127.0.0.1', 0))
+        occupied.listen()
+        self.addCleanup(occupied.close)
+        configured = occupied.getsockname()[1]
+
+        manager = config.ConfigManager(data_root, MODE_FULL)
+        self.addCleanup(manager.stop)
+        manager.refresh()
+        manager.refresh()
+        control = Path(config.control_dir(data_root))
+        path = control / config.CONFIG_NAME
+        source = json.loads(path.read_text('utf-8'))
+        source.pop('denied_paths', None)  # 缺失的可选字段写回后仍缺失
+        source.update(listen_port=configured, api_key=VALID_KEY)
+        path.write_text(json.dumps(source), encoding='utf-8')
+        manager.refresh()
+        manager.refresh()
+        self.assertTrue(manager.snapshot().ready)
+
+        service.request_stop()
+        self.assertTrue(wait_until(service.can_start, 5))
+
+        class Proc:
+            def __init__(self):
+                self.messages = []
+
+            def log(self, level, message):
+                self.messages.append(message)
+
+        proc = Proc()
+        context = Context(proc, temp.name, data_root)
+        tool = ToolSpec('echo', 'echo', object_schema({'value': {'type': 'string'}}),
+                        lambda ctx, args: Outcome({'echo': args.get('value', 'ok')}))
+        manager.set_notify(lambda snapshot: service.apply_config(
+            context, manager, snapshot, tools=(tool,)))
+        errors = []
+
+        def run_service():
+            try:
+                service.start_managed(context, manager, (tool,))
+            except BaseException as exc:  # 线程顶层：交给断言报告
+                errors.append(exc)
+
+        manager_thread = threading.Thread(target=manager.run_forever, daemon=True)
+        service_thread = threading.Thread(target=run_service, daemon=True)
+        with patch.object(config, 'POLL_INTERVAL', 0.02):
+            manager_thread.start()
+            service_thread.start()
+            try:
+                def current_port():
+                    try:
+                        return json.loads(path.read_text('utf-8'))['listen_port']
+                    except (OSError, ValueError, KeyError):
+                        return None
+
+                self.assertTrue(wait_until(
+                    lambda: current_port() not in (None, configured), 10))
+                actual = current_port()
+                self.assertNotEqual(actual, configured)
+                self.assertGreaterEqual(actual, service.FALLBACK_MIN_PORT)
+                init = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+                        'params': dict(INIT_PARAMS)}
+                self.assertTrue(wait_until(
+                    lambda: http_json(actual, init, token=VALID_KEY)[0] == 200, 10))
+                # 确认可服务后只记录一次实际端点；被占用的配置端口不得误报。
+                self.assertEqual(
+                    [message for message in proc.messages
+                     if 'Service listening on' in message],
+                    ['[OlivOSCockpit] Service listening on 127.0.0.1:%d.' % actual])
+
+                status, headers, _raw = http_json(actual, init, token=VALID_KEY)
+                self.assertEqual(status, 200)
+                session = headers.get('Mcp-Session-Id')
+                self.assertIsNotNone(session)
+
+                legacy_list = {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}
+                status, _, raw = http_json(actual, legacy_list,
+                                           {'Mcp-Session-Id': session},
+                                           token=VALID_KEY)
+                self.assertEqual(status, 200)
+                self.assertEqual([item['name'] for item in
+                                  json.loads(raw)['result']['tools']], ['echo'])
+
+                modern_list = {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/list',
+                               'params': {'_meta': {
+                                   protocol.META_VERSION: protocol.MODERN_VERSION,
+                                   protocol.META_CAPABILITIES: {}}}}
+                status, _, raw = http_json(actual, modern_list, {
+                    'MCP-Protocol-Version': protocol.MODERN_VERSION,
+                    'Mcp-Method': 'tools/list'}, token=VALID_KEY)
+                self.assertEqual(status, 200)
+                self.assertEqual([item['name'] for item in
+                                  json.loads(raw)['result']['tools']], ['echo'])
+
+                written = json.loads(path.read_text('utf-8'))
+                expected = dict(source)
+                expected['listen_port'] = actual
+                self.assertEqual(written, expected)
+                self.assertNotIn('denied_paths', written)
+                published = manager.snapshot()
+                self.assertTrue(published.ready)
+                self.assertEqual(published.listen_port, actual)
+                # 被占用的端口仍由测试监听器持有，没有被探测/释放/复用。
+                self.assertEqual(occupied.getsockname()[1], configured)
+            finally:
+                service.request_stop()
+                manager.stop()
+                service_thread.join(10)
+                manager_thread.join(10)
+                self.assertTrue(wait_until(service.can_start, 5))
+        self.assertEqual(errors, [])
+        self.assertFalse(service_thread.is_alive())
+        self.assertFalse(manager_thread.is_alive())
+
+
+@unittest.skipUnless(web is not None, 'aiohttp unavailable')
+class LocalhostFamilyTests(unittest.IsolatedAsyncioTestCase):
+    """localhost 正端口必须让 IPv4/IPv6 监听在同一个端口。"""
+
+    @staticmethod
+    def free_dual_family_port():
+        for _ in range(200):
+            v4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            try:
+                v4.bind(('127.0.0.1', 0))
+                port = v4.getsockname()[1]
+                if port < 1024:
+                    continue
+                v6.bind(('::1', port))
+                return port
+            except OSError:
+                continue
+            finally:
+                v4.close()
+                v6.close()
+        return None
+
+    async def test_localhost_binds_both_families_on_one_positive_port(self):
+        families = {info[0] for info in socket.getaddrinfo(
+            'localhost', 0, type=socket.SOCK_STREAM)}
+        if socket.AF_INET not in families or socket.AF_INET6 not in families:
+            self.skipTest('localhost has no dual-family loopback')
+        port = self.free_dual_family_port()
+        if port is None:
+            self.skipTest('no dual-family loopback port available')
+
+        manager = SimpleNamespace(
+            snapshot=lambda: SimpleNamespace(
+                valid=True, ready=True, api_key=TOKEN, listen_host='localhost',
+                listen_port=port, fingerprint='fingerprint', redaction_enabled=True),
+            allowed=lambda permission=None: True)
+        tool = ToolSpec('echo', 'echo', object_schema(),
+                        lambda ctx, args: Outcome({}))
+        svc = service._Service(CONTEXT, None, (tool,), CALL_TIMEOUT, manager)
+        service._build_app(svc)
+        runner = web.AppRunner(svc.app, handle_signals=False)
+        svc.runner = runner
+        try:
+            await runner.setup()
+            await svc._reconcile()
+            self.assertIsNotNone(svc.site)
+            addresses = runner.addresses
+            self.assertEqual({address[1] for address in addresses}, {port})
+            bound = set()
+            for address in addresses:
+                bound.add(socket.AF_INET6 if ':' in address[0] else socket.AF_INET)
+            self.assertIn(socket.AF_INET, bound)
+            self.assertIn(socket.AF_INET6, bound)
+            for host in ('127.0.0.1', '::1'):
+                reader, writer = await asyncio.open_connection(host, port)
+                writer.close()
+                await writer.wait_closed()
+                del reader
+        finally:
+            await svc._stop_site()
+            await runner.cleanup()
+            svc.close()
 
 
 if __name__ == '__main__':

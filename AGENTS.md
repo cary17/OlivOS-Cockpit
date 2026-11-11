@@ -10,7 +10,9 @@ OlivOS 的 MCP 调试工具。以 OPK 插件形态运行在 OlivOS 插件加载�
 
 **开发源码基线**：每次开始开发前，按 §8.0 自动查询上游最新公开 Release；正式版和测试版一起按发布时间选择，以对应 commit 的源码为本次开发基线，不能把下面的历史审阅版本当作永久开发目标。
 
-**当前已审阅基线**：OlivOS Release **1.0.2-beta.3**，commit [`c6a99fc2a3b4`](https://github.com/OlivOS-Team/OlivOS/tree/c6a99fc2a3b4cc7dd1ea8e7b6fe762b7bee7c7d4)（2026-11-11 核实时仍为最新发布版）。对该版本的完整静态阅读台账为仓库根目录的 `interfaces.json`（分区与计数见 docs/reference.md §1）。本插件与配套 skill 版本统一为 `v0.1.0`，不使用插件自身的 SVN 版本号；`compatible_svn` 是独立的宿主兼容闸门，仍保留。
+**当前已审阅基线**：OlivOS Release **1.0.2-beta.3**，commit [`c6a99fc2a3b4`](https://github.com/OlivOS-Team/OlivOS/tree/c6a99fc2a3b4cc7dd1ea8e7b6fe762b7bee7c7d4)（2026-11-11 核实时仍为最新发布版）。对该版本的完整静态阅读台账为仓库根目录的 `interfaces.json`（分区与计数见 docs/reference.md §1）。
+
+**发布版本约定**：Full / Lite 两个 OPK 与配套 skill 使用同一发布版本；`OlivOSCockpit/app.json` 的整数 `svn` 是插件自身清单字段，`compatible_svn` 是独立的宿主兼容闸门，二者不互相推导。任何插件能力、工具 schema、权限或失败语义变更，必须在同一变更中同步 skill 的功能路由与使用指引（`skills/olivos-cockpit/`），并保持现有构建/测试中的版本一致性与 Lite 物理剔除校验。
 
 ## 开发约定
 
@@ -94,6 +96,8 @@ os.chdir()                           其他插件可能依赖相对路径
 目录条目                 ≤ 500 条/次，超出截断并标记
 OPK 包体 / 中央目录      ≤ 8 MiB / 256 KiB，最多 1024 项；拒绝 ZIP64、多卷和加密
 OPK app.json 实际解压量   ≤ 64 KiB，超限报错，仅读元数据，不 extractall
+插件安装包               ≤ 8 MiB；原始分块 ≤ 512 KiB（base64 ≤ 699052 字符）
+插件安装待上传           全局至多 1 个，固定 5 分钟过期，绑定请求 owner 与配置代次
 响应 UTF-8 序列化后大小   ≤ 1 MiB
 并发在途调用             ≤ 8，达到上限立即返回 503，不排队
                           （两套独立 8 名额：全部 HTTP 请求占入口名额；
@@ -134,6 +138,8 @@ Origin 校验      存在时必须与 listen_host 一致，否则 403（DNS rebi
 
 监听地址可配置，包括非回环地址，但本项目不提供 TLS：Bearer key 与数据以明文 HTTP 传输，跨网络使用等于把凭据和数据暴露给路径上的所有节点。默认保持回环；推荐跨机访问走能到达该回环端点的 SSH 隧道，而不是放宽 `listen_host`。容器部署时回环属于容器自己的网络命名空间，不能默认与容器外宿主相同。
 
+`8767` 只是默认示例值。绑定遇到地址占用时，在有限范围内依次尝试后续正整数端口，IPv4/IPv6 保持同一个实际端口；不接受用户配置端口 0。只有真实绑定成功后，manager 才把实际 `listen_port` 写回 `config.json`，并保留其他本地配置；这不构成与并发外部编辑的 compare-and-swap。候选绑定失败或配置已过期时关闭候选；实际端点写入监听成功日志，客户端必须改用实际端口；使用者也可查看本地 `config.json` 的 `listen_port`，不要通过 MCP 读取控制文件。首次模板创建后“只由人工编辑”的唯一自动更新例外就是这条绑定端口回写。
+
 ### 2.5 协议合规
 
 ```
@@ -155,6 +161,7 @@ Origin 校验      存在时必须与 listen_host 一致，否则 403（DNS rebi
 
 ```
 首次轮询        自动创建模板，api_key 为空；之后只由人工编辑
+                 唯一例外：端口回退真实绑定成功后自动写回 listen_port
 热更新          1 秒轮询；指纹变化先撤权（verifying），连续两次一致后发布
 删除 / 损坏      不重建、不沿用旧快照；服务停止监听并清空会话（fail-closed）
 MCP 读写         本插件数据 namespace（含 control 目录及两份文件）永久拒绝；不因其他插件使用同名文件而放宽或误禁路径
@@ -166,14 +173,15 @@ Lite / Full     互斥安装，若共用同一数据根则共享同一组文件
 ```
 Full 真实账号读      默认允许；仍受路径、字段白名单与资源上限约束
 Full 真实账号写      默认关闭；发送、重载、插件配置/文件更新与账号存档更新需要 full_real_account_write
+Full 插件安装        默认关闭；需要 full_real_account_write + 独立的 full_plugin_install 同时开启
 Full 底层能力        需要 full_real_account_write + full_low_level_access 同时开启
 Lite 真实账号读      默认关闭；开启 lite_real_account_read 后才允许文件与账号读取
 Lite 写入口          cockpit_terminal_input（虚拟终端输入），不受上述开关约束
 ```
 
-发送、重载、插件配置/配置文件更新和账号存档更新绑定 `real_account_write`；`cockpit_proc_get` 与 `cockpit_intercept_rules` 绑定 `low_level_access`，同时要求 Full 写与底层开关。敏感 handler 内与提交前均复核权限/请求代次，不将 `readOnlyHint` 当授权。`cockpit_terminal_input` 不使用真实写开关，是 Lite 唯一写入口。虚拟终端不是沙箱：被触发插件仍可能写真实文件/数据库、访问网络或产生其他副作用。
+发送、重载、插件配置/配置文件更新和账号存档更新绑定 `real_account_write`；插件安装另需独立的 `full_plugin_install`（缺省 `false`，旧配置缺该字段仍有效），不与底层开关合并。`cockpit_proc_get` 与 `cockpit_intercept_rules` 绑定 `low_level_access`，同时要求 Full 写与底层开关。敏感 handler 内与提交前均复核权限/请求代次，不将 `readOnlyHint` 当授权。`cockpit_terminal_input` 不使用真实写开关，是 Lite 唯一写入口。虚拟终端不是沙箱：被触发插件仍可能写真实文件/数据库、访问网络或产生其他副作用。
 
-控制目录、`denied_paths`、OlivOS 运行数据范围之外的路径及宿主源码写入属于最高禁令。普通文件读取限于日志、插件包元数据与其他插件数据 namespace；Full 文件更新另限已有非执行文本配置，账号存档另从磁盘启动配置解析。源码、插件包及本插件控制数据均不可写；数据根只来自受信任宿主上下文，MCP 请求不能扩根。写入格式、提交后核验与运行生效边界见 [受限写入与入站规则](docs/reference.md#4-受限写入与入站规则)。
+控制目录、`denied_paths`、OlivOS 运行数据范围之外的路径及宿主源码写入属于最高禁令。普通文件读取限于日志、插件包元数据与其他插件数据 namespace；Full 文件更新另限已有非执行文本配置，账号存档另从磁盘启动配置解析。宿主源码与本插件控制数据始终不可写；普通文件工具也不写插件包。唯一例外是 Full 专用的 `cockpit_plugin_install`：只在宿主插件包根内安装新包或替换**同 namespace** 的现有包，仍拒绝路径外目标、控制数据与 Cockpit 自身包。数据根与插件包根只来自受信任宿主上下文，MCP 请求不能扩根。写入格式、提交后核验与运行生效边界见 [受限写入与入站规则](docs/reference.md#4-受限写入与入站规则)。
 
 ### 2.7 出站脱敏
 
@@ -209,9 +217,9 @@ Lite 写入口          cockpit_terminal_input（虚拟终端输入），不受�
 
 **路径以宿主实际 I/O 上下文为准，不以部署形态或程序安装位置推断。** 优先复用经核实存在且语义匹配的 OlivOS 路径接口或资源配置，各类资源可有不同的允许根。宿主提供绝对路径时直接使用；相对路径才按其运行数据基准解析。仅在已确认宿主按 cwd 解析相对路径时，才在插件初始化阶段保存当时的 cwd 作为解析基准；不要求它等于源码目录或可执行文件目录。
 
-在参考版本 `c6a99fc2a3b4` 中，`OlivOS/core/info/infoAPI.py` 的版本与路径常量为 `OlivOS_Version='1.0.2'`、`SVN=300`、`SVN_Compatible=190`、`OlivOS_plugin_data_path='./plugin/data'`。这是**相对路径常量，不是绝对根查询 API**；插件只把它当作相对运行数据基准的默认值，缺失或非法时相关工具安全失败。`Proc.get_main_root()` 返回 GUI 根对象，不是文件系统目录，不能拿来解析路径。
+在参考版本 `c6a99fc2a3b4` 中，`OlivOS/core/info/infoAPI.py` 的版本与路径常量为 `OlivOS_Version='1.0.2'`、`OlivOS_SVN=300`、`OlivOS_SVN_Compatible=190`、`OlivOS_plugin_data_path='./plugin/data'`。这是**相对路径常量，不是绝对根查询 API**；插件只把它当作相对运行数据基准的默认值，缺失或非法时相关工具安全失败。`Proc.get_main_root()` 返回 GUI 根对象，不是文件系统目录，不能拿来解析路径。
 
-不凭 `__file__`、`sys.executable`、`argv[0]`、打包临时目录（如 `sys._MEIPASS`）或 Docker `WORKDIR` 猜数据根，不调用 `os.chdir()` 或全盘搜索补救。使用标准库原生路径语义处理 Windows / POSIX 路径、空格和非 ASCII 名称；存在性、权限及边界检查等 I/O 在服务线程内完成。根目录只能来自受信任的宿主上下文，不能由 MCP 请求指定。
+不凭 `__file__`、`sys.executable`、`argv[0]`、打包临时目录（如 `sys._MEIPASS`）或 Docker `WORKDIR` 猜数据根，不调用 `os.chdir()` 或全盘搜索补救。使用标准库原生路径语义处理 Windows / POSIX 路径、空格和非 ASCII 名称；存在性、权限及边界检查等 I/O 在服务线程内完成。根目录只能来自受信任的宿主上下文，不能由 MCP 请求指定。插件安装的服务端根是宿主 `OlivOS.pluginAPI.plugin_path`（相对初始化上下文根解析），客户端不能传任意绝对路径或扩大该根。
 
 ### 3.2 能力分层
 
@@ -241,6 +249,27 @@ namespace 只允许单个目录名；拒绝绝对路径、"."、".."、路径分
 ```
 
 首版使用 POSIX 目录句柄逐组件安全打开，保守拒绝所有符号链接（包括根的祖先目录）。缺少所需安全打开原语的平台仅禁用文件读取能力并返回明确错误，工具仍在列表中；不得以存在竞态的 `resolve` 后 `open` 替代。跨平台支持以实际验收为准。
+
+**插件安装层（仅 Full）** — `cockpit_plugin_install` 是普通文件写入禁令的专用窄例外：
+
+```
+权限         full_real_account_write ∧ full_plugin_install（独立开关，默认 false）
+上传         单工具必填 operation=begin/write/commit/cancel；单包 ≤ 8 MiB；原始分块 ≤ 512 KiB
+             begin: filename/namespace/size；write: upload_id/offset/chunk
+             commit: upload_id/新包完整 sha256(64 hex)；cancel: upload_id
+             全局至多 1 个待上传；固定 5 分钟过期；绑定 owner 与配置代次
+             过期/撤销/取消关闭；他 owner 请求不清除持有者上传
+             通过会话/归属校验的 commit 消费上传（含失败）；外层校验拒绝可能保留
+目标         宿主 plugin_path（相对 ctx.root）；新 namespace 或同 namespace 覆盖
+             拒绝客户端绝对路径、控制数据、宿主源码、路径外目标与 Cockpit 自身包
+覆盖         同 namespace 覆盖明确允许；不需要旧包 SHA-256 或旧内容修订门槛
+             旧包可能丢失；外部写入方由使用者协调；不保证跨进程 CAS
+完整性       commit 携带新包完整 SHA-256 供上传/落盘核验，不匹配拒绝
+             结果返回同一新包 SHA-256；该值不是旧包前提；结构校验通过才提交
+生效         只持久化并校验，不自动 reload；reload 是单独授权的整加载器动作
+```
+
+包格式与客户端边界：官方 OPK 是 ZIP 根部直接放置插件目录内容（`app.json`、`__init__.py`、`main.py` 及 `resources` 等），无外层文件夹，`app.json` 为 UTF-8 无 BOM；已有 `.opk` 保持字节不变。实现复用现有 MCP 上传与标准库 ZIP，不引入通用 HTTP 客户端或新依赖。客户端本地文件读取/打包权限由客户端环境决定，与服务端 MCP 路径无关；从源码打包不得导入或执行被安装源码/构建脚本，并排除本地密钥、VCS、缓存、虚拟环境和构建产物。结构校验不是沙箱：包内代码在后续加载时以宿主进程权限执行，包括自动或外部触发的重启。
 
 **运行时层** — 需要 `Proc`，仅在加载器进程内可用
 
@@ -366,7 +395,7 @@ TLS 终止              本项目不做；需要时由外部反向代理承担
 - 静态工具表：现代规范要求 `tools/list` 不随连接变化且顺序确定。运行时拿不到某个能力也不从列表删工具，调用返回 `isError: true`；未完成安全绑定的接口只在内部台账登记，二者不可混淆。全部工具名以 `cockpit_` 开头，定义按名称确定性排序。
 - `interfaces.json` 的 candidate 是固定源码审阅分类，不等于公开执行表。只有实际安全绑定进入 `tool_bindings` / registry 的名称对客户端可见；未绑定项不展示、不接受猜名调用，不发布永久失败的候选占位工具。hidden/blocked/internal（进程终止、线程强停、账号保存、消息反射等）只内部分类。
 - `catalog_tools.py` 是历史/审计候选快照，**永不并入运行注册表**，两个构建都不导入。
-- Lite 物理剔除：Lite 归档不含 `full_only.py`、`adapter_tools.py`、`file_write.py`、`account_write.py`、`intercept.py`，不通过运行时开关隐藏 Full 实现；共享的 `cockpit_terminal_input` 是 Lite 唯一非只读工具。
+- Lite 物理剔除：Lite 归档不含 `full_only.py`、`adapter_tools.py`、`file_write.py`、`account_write.py`、`intercept.py`、`plugin_install.py` 及插件安装实现，不通过运行时开关隐藏 Full 实现；共享的 `cockpit_terminal_input` 是 Lite 唯一非只读工具。`cockpit_plugin_install` 仅 Full，且需 `full_real_account_write` 与独立默认关闭的 `full_plugin_install` 双授权。
 - 日志与插件数据只在 §3.2 的允许路径和 §2.3 的资源上限内读取，截断必须标记。所有发往客户端的应用值在统一响应构造边界按 §2.7 脱敏，两版同策略、无绕过参数；覆盖工具结果、正文、错误和降级路径。
 - 脱敏仅生成副本，不能改变宿主数据、文件或 SDK 原始参数；工具的文本与结构化结果必须来自同一份干净数据。必须区分应用值与协议信封/schema，保留必要的请求 ID、错误码、会话头及操作句柄。已知凭据只从 `api_key` 和宿主字段白名单有界采集，不反射补搜或记录原值。脱敏失败、超限或编码失败只能返回固定安全错误/截断并禁止 after_send，不得回退原文；CancelledError 继续按 §2.1 传播。
 - 用户选择保留规则脱敏后的正文，而非隐藏全部未知内容。不能把未命中规则等同于无敏感信息：无标签或未知格式的个人信息、业务秘密仍可能漏识别，原始磁盘内容也未被修改。
@@ -429,7 +458,7 @@ https://github.com/OlivOS-Team/OlivOSDoc
 
 修改路径解析前，须对照目标宿主源码或发行版核实，不能把已读源码当作所有部署的运行验收。参考版本为 [1.0.2-beta.3 / c6a99fc2a3b4](https://github.com/OlivOS-Team/OlivOS/tree/c6a99fc2a3b4cc7dd1ea8e7b6fe762b7bee7c7d4)：
 
-- infoAPI 版本与路径常量：`OlivOS/core/info/infoAPI.py`（`OlivOS_plugin_data_path='./plugin/data'`，SVN 300 / 兼容闸门 190）
+- infoAPI 版本与路径常量：`OlivOS/core/info/infoAPI.py`（`OlivOS_plugin_data_path='./plugin/data'`，`OlivOS_SVN=300` / `OlivOS_SVN_Compatible=190`）
 - 插件路径与默认布局：`OlivOS/core/core/pluginAPI.py`
 - 日志默认路径：`OlivOS/core/core/diagnoseAPI.py`（`./logfile/`）
 - 接口台账：仓库根目录 `interfaces.json`（docs/reference.md §1）
@@ -490,6 +519,10 @@ C 扩展死循环占满 GIL            → 加载器进程卡死
                代次变化：已接受通知保持 202 空正文；错误保留状态/头/码；成功结果被替换且 after_send 不执行
 配置           首次加载创建两份模板且 api_key 为空；无 key 不监听
                修好配置后自动监听；改端口/地址会先停旧监听再绑定
+               端口占用时有界回退后续正整数端口；IPv4/IPv6 同一实际端口；拒绝端口 0
+               仅真实绑定成功后由 manager 写回 listen_port、保留其他配置；候选失败/过期即关闭
+               回退后实际端点可从监听成功日志确认（或本地 config.json 的 listen_port，不经 MCP）；客户端改用实际端口；不承诺并发编辑器 CAS
+               full_plugin_install 缺省 false，旧配置缺该字段仍有效；与 full_real_account_write 双门控
                删除或写坏任一文件后 fail-closed；恢复才重新放行
                key 轮换使旧传统会话失效；配置热更新先撤权再发布
                config.json / redaction.json 与本插件 namespace（含 control）对所有文件工具不可读
@@ -520,14 +553,15 @@ bots           无可靠适配器状态时 connection 为 'unknown'，断线账�
                关闭脱敏仍做 JSON/限额校验；未知业务秘密可能漏识别
                原始事件仅覆盖 run_plugin 转换前白名单字段，不宣称流量全覆盖
                异常/超限无原文降级、不执行 after_send
-工具集         Full 61 个、Lite 35 个（以注册表导出为准）；全部以 cockpit_ 开头
+工具集         Full 62 个、Lite 35 个（以注册表导出为准）；全部以 cockpit_ 开头
                Lite 包内与 Full 共用 cockpit_terminal_input，但不含
-               full_only / adapter_tools / file_write / account_write / intercept 的任何实现
+               full_only / adapter_tools / file_write / account_write / intercept / 安装实现的任何代码
                未安全绑定的 candidate 及 hidden/blocked 只内部登记，不列出且猜名调用失败
                tool_bindings 与 Full/Lite registry、handler、测试文件一致；动态声明不遗漏
                运行时能力缺失时工具仍在表中，调用返回 isError: true
 权限           Full 真实写默认关闭；适配器发送被拒，开启 full_real_account_write 后放行
                low_level 需要 full_real_account_write + full_low_level_access 同时开启
+               插件安装需要 full_real_account_write + full_plugin_install 同时开启；Lite 无实现
                Lite 真实账号读默认关闭，开启 lite_real_account_read 后才可读
                cockpit_terminal_input 在 Lite 可用；虚拟终端非沙箱已文档化
 终端账号       运行期与 init 期对宿主账号字典零增删；无合格账号明确停用并可操作
@@ -544,7 +578,18 @@ bots           无可靠适配器状态时 connection 为 'unknown'，断线账�
                持久化与运行生效分开报告；需要完整宿主重启，不假报加载器重载即可生效
 入站规则       写∧底层双授权；旧请求不能清新规则；配置代次变化清空
                原调用次数、drop/replace_text、一致字段及非全流量覆盖均需验证
+插件安装       写∧full_plugin_install 双授权；Lite 物理不含实现；缺省 false 且旧配置仍有效
+               单包 ≤8 MiB、分块 ≤512 KiB、单待上传、5 分钟过期、owner/代次绑定
+               服务端根仅 plugin_path；拒绝绝对路径、控制数据、宿主源码、路径外目标、自身包
+               同 namespace 覆盖无需旧包 SHA 或替代修订门槛；旧包可能丢失
+               commit 必须携带新包 SHA-256 校验上传/落盘，成功结果返回该值供核验
+               ZIP 根部为插件目录内容、无外层文件夹、app.json UTF-8 无 BOM；已有 OPK 保字节
+               提交后不自动 reload；单独授权的整加载器 reload 才加载；结构校验非沙箱
+               客户端本地打包/路径权限与服务器 MCP 权限分开；不上传本地任意路径、不泄露完整 base64
 文档一致性     README / AGENTS 的工具数与 registry 导出一致，统一使用 cockpit_ 前缀
+               任何功能/schema/权限/失败语义变更同步 skill 使用指引与 evaluator 场景
+               README 使用 `<version>` 通用包名，不写死具体发布版本或归档名
+               app.json 保留整数 svn；compatible_svn 独立；构建版本一致性守卫不削弱
                interfaces.json 的 tool_bindings 随 handler 移动同步首行号，上游静态审阅区不重写
 发布说明       仅明确标记的插件/skill 功能变更进入说明，内部维护与未知标题不收录
 许可分发       根 LICENSE 与两个 OPK、skill ZIP 中的许可证副本一致
@@ -583,6 +628,9 @@ gh api "repos/OlivOS-Team/OlivOS/commits/$upstream_tag" --jq '{sha, html_url}'
                     → reference 工具行为 + skill 功能路由与使用指引（涉及安装/配置时同步 README）→ 计数核对
 改路径/写入         fs.py 安全打开原语 → files.py / file_write.py / account_write.py
                     → path_policy 回归 → 上游基线核实（§5.3）
+改插件安装          install handler / registry ToolSpec + 双权限门 → profiles/lite_registry.py 物理剔除
+                    → 上传/zip/路径/覆盖测试 → interfaces.json → reference + skill 操作指引
+                    → 构建确认 Full/Lite 包不含对方实现
 改协议              protocol.py 纯值层 → service.py 分派/边界 → test_protocol / test_service
                     → 两时代回归 + AGENTS §3.4 与 reference 同步
 改生命周期          main.py → config.py → service.py → test_entry / test_config_service / test_service_core
@@ -626,7 +674,7 @@ handler（模块内，含权限/只读元数据）→ ToolSpec（schema、requir
 
 本项目代码与配套 skill 采用 `AGPL-3.0-or-later`，根 `LICENSE` 为完整许可证文本；两个 OPK 的 `LICENSE` 与 skill ZIP 的 `olivos-cockpit/LICENSE` 必须携带同一副本。README 首次提及 OlivOS 时链接上游以声明来源；第三方项目及素材仍遵循各自许可。
 
-发版时同步 `OlivOSCockpit/app.json` 的 version、`contracts.VERSION`、`skills/olivos-cockpit/SKILL.md` 的 metadata.version 与版本文案，再更新 README 附件名和相关测试；三者与人工输入版本必须完全一致。版本使用 `vX.Y.Z` 或带预发布后缀的形式，不添加自身 svn；宿主兼容字段与宿主 SVN 查询不受影响。
+发版时同步 `OlivOSCockpit/app.json` 的 version、`contracts.VERSION`、`skills/olivos-cockpit/SKILL.md` 的 metadata.version 与版本文案，再更新 README 版本说明和相关测试；三者与人工输入版本必须完全一致。版本使用 `vX.Y.Z` 或带预发布后缀的形式。`app.json` 的 `svn` 是插件自身整数清单字段（当前 `1`），不随版本号推导，也不得删除或改成字符串；`compatible_svn` 仍是独立的宿主兼容闸门，与插件自身 `svn`、发布版本互不替代。
 
 `scripts/release.py` 在测试前预留固定 commit 的草稿，上传前后检查原 Release ID，并只发布这份草稿；已公开版本或 tag 指向不同 commit 时拒绝覆盖。测试或构建失败保留草稿；临时故障可重跑原任务，源码修正后需删除旧草稿，从更新后的 main 重新人工触发（已有同版本 tag 必须指向本次 commit）。草稿被删除后旧任务重跑不得重建，重新人工触发才允许创建。
 

@@ -388,6 +388,40 @@ class EntryTests(unittest.TestCase):
             main._tick(context, manager)
             self.assertEqual(len(calls), 1)  # 健康态 tick 不再 apply
 
+    def test_tool_staging_is_swept_on_revocation_and_supervisor_tick(self):
+        manager = config.ConfigManager('/unused/data')
+        context = Context(self.proc, '/unused', '/unused/data', config=manager)
+        swept = []
+        with patch.object(main, '_target', (context, manager)), \
+                patch.object(main.registry, 'tick', swept.append, create=True), \
+                patch.object(main.terminal, 'tick', lambda ctx: None), \
+                patch.object(main.service, 'apply_config', return_value=True):
+            main._on_config(context, manager, manager.snapshot())
+            main._tick(context, manager)
+        self.assertEqual(swept, [context, context])
+
+    def test_stale_or_stopped_owner_cannot_sweep_new_tool_staging(self):
+        old = config.ConfigManager('/unused/data')
+        current = config.ConfigManager('/unused/data')
+        context = Context(self.proc, '/unused', '/unused/data', config=current)
+        swept = []
+        with patch.object(main, '_target', (context, current)), \
+                patch.object(main.registry, 'tick', swept.append, create=True):
+            main._tool_tick(context, old)
+            current.stop()
+            main._tool_tick(context, current)
+        self.assertEqual(swept, [])
+
+    def test_tool_staging_failure_does_not_escape_or_block_config_change(self):
+        manager = config.ConfigManager('/unused/data')
+        context = Context(self.proc, '/unused', '/unused/data', config=manager)
+        with patch.object(main, '_target', (context, manager)), \
+                patch.object(main.registry, 'tick', side_effect=SystemExit('staging-secret'), create=True), \
+                patch.object(main.service, 'apply_config', return_value=True) as apply:
+            main._on_config(context, manager, manager.snapshot())
+        apply.assert_called_once()
+        self.assertNotIn('staging-secret', str(self.messages))
+
     def test_retry_keeps_pending_if_another_start_takes_the_slot(self):
         manager = config.ConfigManager('/unused/data')
         context = Context(self.proc, '/unused', '/unused/data', config=manager)

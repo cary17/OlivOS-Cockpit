@@ -219,14 +219,7 @@ def _manifest(raw):
 
 
 def cockpit_plugins(ctx, args):
-    root = _open_root(ctx.root, ctx)
-    try:
-        app_fd, kind = fs.open_rel(root, 'plugin/app')
-    finally:
-        os.close(root)
-    if kind != 'dir':
-        os.close(app_fd)
-        raise ToolError('Plugin package directory is unavailable')
+    app_fd = fs.open_package_root(ctx)
     try:
         entries, more = fs.list_dir(app_fd)
         items = []
@@ -238,8 +231,11 @@ def cockpit_plugins(ctx, args):
                 continue
             if entry['type'] == 'dir':
                 try:
-                    fs.authorize_path(ctx, os.path.join(ctx.root, 'plugin/app', entry['name'], 'app.json'))
+                    check_fd, kind = fs.open_rel(app_fd, entry['name'] + '/app.json')
                 except ToolError:
+                    continue
+                os.close(check_fd)
+                if kind != 'file':
                     continue
             if entry['type'] == 'file' and entry['size'] > MAX_OPK:
                 record = {'filename': entry['name'], 'error': 'Package too large'}
@@ -412,13 +408,16 @@ def _find_manifest(app_fd, namespace, ctx):
     entries, _ = fs.list_dir(app_fd)
     found = []
     for entry in entries:
+        record = {'filename': entry['name']}
         if entry['type'] == 'file' and entry['name'].endswith('.opk'):
             if entry['size'] > MAX_OPK:
                 continue
             try:
-                raw = fs.package_manifest(fs.read_package(app_fd, entry['name']))
+                package = fs.read_package(app_fd, entry['name'])
+                raw = fs.package_manifest(package)
             except ToolError:
                 continue
+            record.update(size=len(package), sha256=hashlib.sha256(package).hexdigest())
         elif entry['type'] == 'dir':
             try:
                 raw = _read_manifest(app_fd, entry['name'] + '/app.json')
@@ -431,7 +430,8 @@ def _find_manifest(app_fd, namespace, ctx):
         except ToolError:
             continue
         if manifest.get('namespace') == namespace:
-            found.append({'filename': entry['name'], 'manifest': manifest})
+            record['manifest'] = manifest
+            found.append(record)
             if len(found) == 2:
                 break
     return found
@@ -448,14 +448,7 @@ def cockpit_meta(ctx, args):
                                  or '/' in filename or '\\' in filename
                                  or '\x00' in filename or filename in ('.', '..')):
         raise ToolError('Invalid package filename')
-    root = _open_root(ctx.root, ctx)
-    try:
-        app_fd, kind = fs.open_rel(root, 'plugin/app')
-    finally:
-        os.close(root)
-    if kind != 'dir':
-        os.close(app_fd)
-        raise ToolError('Plugin package directory is unavailable')
+    app_fd = fs.open_package_root(ctx)
     try:
         if namespace is not None:
             found = _find_manifest(app_fd, namespace, ctx)
@@ -464,11 +457,16 @@ def cockpit_meta(ctx, args):
             if len(found) > 1:
                 raise ToolError('Multiple packages match the namespace; specify filename')
             return Outcome(found[0])
+        record = {'filename': filename}
         if filename.endswith('.opk'):
-            raw = fs.package_manifest(fs.read_package(app_fd, filename))
+            package = fs.read_package(app_fd, filename)
+            raw = fs.package_manifest(package)
+            # 与本次读取同源的整包摘要，供安装结果核验；不是覆盖前内容闸门。
+            record.update(size=len(package), sha256=hashlib.sha256(package).hexdigest())
         else:
             raw = _read_manifest(app_fd, filename + '/app.json')
-        return Outcome({'filename': filename, 'manifest': _manifest(raw)})
+        record['manifest'] = _manifest(raw)
+        return Outcome(record)
     finally:
         os.close(app_fd)
 

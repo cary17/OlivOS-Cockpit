@@ -173,9 +173,22 @@ def _retry_start(context, manager):
         _log(context.proc, 'Service start could not be retried safely.')
 
 
+def _tool_tick(context, manager):
+    """在现有监督线程清理过期或已撤权的工具暂存，不增加线程。"""
+    if _stopped(manager) or not _current(context, manager):
+        return
+    tick = getattr(registry, 'tick', None)
+    if callable(tick):
+        try:
+            tick(context)
+        except BaseException:
+            _log(context.proc, 'Tool staging cleanup failed safely.')
+
+
 def _tick(context, manager):
-    """每秒监督接缝：只读终端 + 有限次数接替尝试，健康态不做 reconcile。"""
+    """每秒监督接缝：终端检查、工具暂存清理与有限接替；健康态不做 reconcile。"""
     _terminal_tick(context, manager)
+    _tool_tick(context, manager)
     try:
         _retry_start(context, manager)
     except BaseException:
@@ -221,6 +234,7 @@ def _on_config(context, manager, snapshot):
     # 停止或已被接替的旧回调不再准备或发布；会话清理仍由服务私有 loop 负责。
     if _stopped(manager) or not _current(context, manager):
         return
+    _tool_tick(context, manager)
     # 就绪发布额外验证只读选择，不创建或迁移账号。
     if snapshot.ready:
         try:

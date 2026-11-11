@@ -698,7 +698,7 @@ class ReplyTests(unittest.TestCase):
 
     def test_public_protocol_metadata_is_not_rewritten_as_a_known_secret(self):
         known = ('tool', 'tools', 'isError', '_meta', 'readOnlyHint', 'OlivOS',
-                 'protocol', 'capabilities', 'serverInfo', 'v0.1.0', protocol.MODERN_VERSION)
+                 'protocol', 'capabilities', 'serverInfo', 'v0.2.0', protocol.MODERN_VERSION)
         spec = ToolSpec('tool', 'description', object_schema({'user_id': {'type': 'string'}}),
                         lambda ctx, args: None)
         data = {'safe': 'value'}

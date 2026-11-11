@@ -28,7 +28,7 @@
       }
     },
     "published_tools": {
-      "full": 61,
+      "full": 62,
       "lite": 35
     }
   },
@@ -79595,7 +79595,7 @@
     "cockpit_data": {
       "handler": "OlivOSCockpit.files.cockpit_data",
       "handler_file": "OlivOSCockpit/files.py",
-      "handler_line": 332,
+      "handler_line": 328,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -80020,7 +80020,7 @@
     "cockpit_log": {
       "handler": "OlivOSCockpit.files.cockpit_log",
       "handler_file": "OlivOSCockpit/files.py",
-      "handler_line": 269,
+      "handler_line": 265,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -80136,6 +80136,22 @@
         "tests/test_path_policy.py"
       ],
       "verification": "repository_stub_tests; not_live_platform_verification"
+    },
+    "cockpit_plugin_install": {
+      "handler": "OlivOSCockpit.plugin_install.cockpit_plugin_install",
+      "handler_file": "OlivOSCockpit/plugin_install.py",
+      "handler_line": 190,
+      "required_permission": "plugin_install",
+      "read_only": false,
+      "profiles": [
+        "full"
+      ],
+      "tests": [
+        "tests/test_plugin_install.py",
+        "tests/test_build.py",
+        "tests/test_loader.py"
+      ],
+      "verification": "repository_stub_tests; isolated_real_loader_smoke; not_live_platform_verification"
     },
     "cockpit_plugin_loaded_list": {
       "handler": "OlivOSCockpit.read_tools._metadata_spec.<locals>.handle",

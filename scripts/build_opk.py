@@ -119,7 +119,8 @@ def build(output, root=None):
         if not lite:
             files['full_only.py'] = (source / 'full_only.py').read_bytes()
             files['adapter_tools.py'] = (source / 'adapter_tools.py').read_bytes()
-            for module in ('intercept.py', 'file_write.py', 'account_write.py'):
+            for module in ('intercept.py', 'file_write.py', 'account_write.py',
+                           'plugin_install.py'):
                 files[module] = (source / module).read_bytes()
         destination = output / f'{name}-{version}.opk'
         _write_archive(destination, files)

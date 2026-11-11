@@ -1,11 +1,13 @@
 """文件工具与安全原语测试；仅标准库，不加载宿主、不访问真实 OlivOS 目录。"""
 
+import hashlib
 import io
 import json
 import os
 import struct
 import sys
 import tempfile
+import types
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -23,8 +25,13 @@ def base_dir():
     return os.path.realpath(tempfile.mkdtemp(prefix='cockpit-test-'))
 
 
+def host_stub(plugin_path='./plugin/app/'):
+    return types.SimpleNamespace(pluginAPI=types.SimpleNamespace(plugin_path=plugin_path))
+
+
 def make_ctx(root):
-    return Context(proc=None, root=root, data_root=os.path.join(root, 'plugin/data'))
+    return Context(proc=None, root=root, data_root=os.path.join(root, 'plugin/data'),
+                   olivos=host_stub())
 
 
 class Snapshot:
@@ -52,7 +59,7 @@ class Manager:
 
 def make_scoped_ctx(root, mode=contracts.MODE_FULL, **values):
     return Context(proc=None, root=root, data_root=os.path.join(root, 'plugin/data'),
-                   config=Manager(Snapshot(**values)), permission_mode=mode)
+                   olivos=host_stub(), config=Manager(Snapshot(**values)), permission_mode=mode)
 
 
 def touch(path, data=b'', mode=None):
@@ -648,10 +655,10 @@ class DataTests(SafeError):
 
         touch(os.path.join(self.ns, 'generation.json'), payload)
         generation_one = Context(
-            None, self.root, os.path.join(self.root, 'plugin/data'),
+            None, self.root, os.path.join(self.root, 'plugin/data'), olivos=host_stub(),
             config=Manager(Snapshot(generation=1)), request_generation=1)
         generation_two = Context(
-            None, self.root, os.path.join(self.root, 'plugin/data'),
+            None, self.root, os.path.join(self.root, 'plugin/data'), olivos=host_stub(),
             config=Manager(Snapshot(generation=2)), request_generation=2)
         generation_cursor = first_cursor(generation_one, 'generation.json')
         with self.assertRaises(ToolError):
@@ -890,6 +897,14 @@ class PluginTests(SafeError):
         touch(os.path.join(self.app, 'Src/app.json'), manifest_bytes('Src'))
         outcome = files.cockpit_meta(make_ctx(self.root), {'filename': 'Src'})
         self.assertEqual(outcome.data['manifest']['namespace'], 'Src')
+
+    def test_meta_reports_digest_and_size_from_the_same_read(self):
+        package = os.path.join(self.app, 'A.opk')
+        make_opk(package, namespace='A')
+        outcome = files.cockpit_meta(make_ctx(self.root), {'filename': 'A.opk'})
+        raw = read_bytes(package)
+        self.assertEqual(outcome.data['size'], len(raw))
+        self.assertEqual(outcome.data['sha256'], hashlib.sha256(raw).hexdigest())
 
 
 class OpkTests(SafeError):

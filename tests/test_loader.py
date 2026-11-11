@@ -22,17 +22,22 @@ FULL_ONLY = ('cockpit_send', 'cockpit_reload', 'cockpit_proc_get')
 class LoaderTests(unittest.TestCase):
     def test_full_and_lite_real_loader_after_temporary_package_cleanup(self):
         script = '''
+import base64
+import hashlib
+import io
 import json
 import os
 import queue
 from pathlib import Path
 import shutil
+import socket
 import sys
 import tempfile
 import threading
 from types import SimpleNamespace
 import urllib.error
 import urllib.request
+import zipfile
 
 opk, mode, token = sys.argv[1], sys.argv[2], sys.argv[3]
 FULL_ONLY = {'cockpit_send', 'cockpit_reload', 'cockpit_proc_get'}
@@ -58,18 +63,25 @@ with tempfile.TemporaryDirectory() as directory:
     names = {tool.name for tool in TOOLS}
     assert ('OlivOSCockpit.full_only' in sys.modules) == (mode == 'full')
     assert ('OlivOSCockpit.adapter_tools' in sys.modules) == (mode == 'full')
+    assert ('OlivOSCockpit.plugin_install' in sys.modules) == (mode == 'full')
     if mode == 'lite':
         assert names & FULL_ONLY == set()
         assert {tool.name for tool in TOOLS if not tool.read_only} == {'cockpit_terminal_input'}
     else:
         assert FULL_ONLY <= names
         assert all(tool.name == 'cockpit_terminal_input' or tool.required_permission in (
-            'real_account_write', 'low_level_access') for tool in TOOLS if not tool.read_only)
+            'real_account_write', 'low_level_access', 'plugin_install')
+            for tool in TOOLS if not tool.read_only)
+    # 保持一个已占用端口，验证真实加载器回退后客户端使用回写的端口。
+    blocker = socket.socket()
+    blocker.bind(('127.0.0.1', 0))
+    blocker.listen()
+    original_port = blocker.getsockname()[1]
     # 配置来自运行数据根，而不是环境变量。
     control = Path('plugin/data/OlivOSCockpit/control')
     control.mkdir(parents=True, exist_ok=True)
     (control / 'config.json').write_text(json.dumps({
-        'listen_host': '127.0.0.1', 'listen_port': 8767, 'api_key': token,
+        'listen_host': '127.0.0.1', 'listen_port': original_port, 'api_key': token,
         'redaction_enabled': True, 'lite_real_account_read': False,
         'full_real_account_write': False, 'full_low_level_access': False,
         'denied_paths': [],
@@ -84,7 +96,8 @@ with tempfile.TemporaryDirectory() as directory:
         'Accept': 'application/json, text/event-stream',
     }
     def post(body, headers):
-        req = urllib.request.Request('http://127.0.0.1:8767/mcp',
+        settings = json.loads((control / 'config.json').read_text(encoding='utf-8'))
+        req = urllib.request.Request('http://127.0.0.1:' + str(settings['listen_port']) + '/mcp',
             data=json.dumps(body).encode(), headers=headers, method='POST')
         try:
             response = urllib.request.urlopen(req, timeout=2)
@@ -93,22 +106,31 @@ with tempfile.TemporaryDirectory() as directory:
         with response:
             data = response.read()
             return response.status, response.headers, json.loads(data) if data else None
+    def read_when_ready(body, headers):
+        # 仅用于只读请求；配置发布窗口的 503/重绑断线不触发写入重放。
+        for attempt in range(200):
+            try:
+                result = post(body, headers)
+            except OSError:
+                if attempt == 199:
+                    raise
+            else:
+                if result[0] == 200:
+                    return result
+                assert result[0] == 503, result
+            threading.Event().wait(0.03)
+        raise AssertionError('read-only request remained unavailable')
     modern = dict(common, **{'MCP-Protocol-Version':'2026-07-28', 'Mcp-Method':'tools/list'})
     body = {'jsonrpc':'2.0','id':1,'method':'tools/list','params':{'_meta':{
         'io.modelcontextprotocol/protocolVersion':'2026-07-28',
         'io.modelcontextprotocol/clientCapabilities':{},
     }}}
-    for attempt in range(200):
-        try:
-            status, headers, result = post(body, modern)
-            break
-        except OSError:
-            if attempt == 199:
-                raise
-            threading.Event().wait(0.03)
+    status, headers, result = read_when_ready(body, modern)
     assert status == 200 and len(result['result']['tools']) == expected
     assert {tool['name'] for tool in result['result']['tools']} == names
     assert result['result']['resultType'] == 'complete'
+    assert json.loads((control / 'config.json').read_text(encoding='utf-8'))['listen_port'] != original_port
+    blocker.close()
     initialize = {'jsonrpc':'2.0','id':2,'method':'initialize','params':{
         'protocolVersion':'2025-11-25','capabilities':{},
         'clientInfo':{'name':'isolated-smoke','version':'1'},
@@ -134,7 +156,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert not loaded['truncated'] and len(loaded['plugins']) == 1, loaded
         detail = loaded['plugins'][0]
         assert detail['namespace'] == 'OlivOSCockpit', detail
-        assert detail['version'] == 'v0.1.0', detail
+        assert detail['version'] == 'v0.2.0', detail
         assert 'model' not in detail
         native = loader.plugin_models_dict['OlivOSCockpit']
         for key in ('priority', 'priority_default', 'priority_user', 'priority_effective'):
@@ -154,12 +176,12 @@ with tempfile.TemporaryDirectory() as directory:
         # 用户预置的账号就是配置账号：计数包含它。
         assert result['result']['structuredContent']['count'] == 1, result
     from OlivOSCockpit import files, main
-    # app.json 不再写自身 svn：以文件工具的清单语义为准，不猜测宿主模型字段。
+    # 插件自身 svn 与宿主 compatible_svn 是两个独立字段。
     manifest = files.cockpit_meta(main._context, {'filename': Path(opk).name})
     assert not manifest.is_error, manifest.data
-    assert manifest.data['manifest']['version'] == 'v0.1.0', manifest.data
+    assert manifest.data['manifest']['version'] == 'v0.2.0', manifest.data
     assert manifest.data['manifest']['compatible_svn'] == 190, manifest.data
-    assert 'svn' not in manifest.data['manifest'], manifest.data
+    assert manifest.data['manifest']['svn'] == 1, manifest.data
     state = main._context.terminal
     assert state['hash'] == provisioned.hash and state['bot'] is provisioned, state
     main.Event.init(None, loader)
@@ -247,14 +269,7 @@ with tempfile.TemporaryDirectory() as directory:
             arguments['cursor'] = cursor
         request = {'jsonrpc':'2.0','id':20 + index,'method':'tools/call','params':{
             'name':'cockpit_data','arguments':arguments,'_meta':body['params']['_meta']}}
-        for attempt in range(200):
-            try:
-                status, _, result = post(request, data_headers)
-                break
-            except OSError:
-                if attempt == 199:
-                    raise
-                threading.Event().wait(0.03)
+        status, _, result = read_when_ready(request, data_headers)
         assert status == 200 and not result['result']['isError'], result
         clean = result['result']['structuredContent']
         assert clean['paged'] and 'sha256' not in clean, clean
@@ -314,12 +329,66 @@ with tempfile.TemporaryDirectory() as directory:
         assert ''.join(chunks).count(ending) == len(records) - 1
     assert jsonl_path.read_bytes().decode('utf-8') == jsonl_source
     if mode == 'full':
+        def install_call(arguments, modern_call):
+            params = {'name':'cockpit_plugin_install','arguments':arguments}
+            query_headers = legacy
+            if modern_call:
+                params['_meta'] = body['params']['_meta']
+                query_headers = dict(common, **{'MCP-Protocol-Version':'2026-07-28',
+                    'Mcp-Method':'tools/call','Mcp-Name':'cockpit_plugin_install'})
+            status, _, result = post({'jsonrpc':'2.0','id':700,'method':'tools/call',
+                'params':params}, query_headers)
+            assert status == 200, result
+            return result['result']
+        denied = install_call({'operation':'begin','filename':'installer-smoke.opk',
+            'namespace':'InstallerSmoke','size':1}, True)
+        assert denied['isError'], denied
         settings_path = control / 'config.json'
         settings = json.loads(settings_path.read_text(encoding='utf-8'))
-        settings.update(full_real_account_write=True, full_low_level_access=True)
+        settings.update(full_real_account_write=True, full_low_level_access=True, full_plugin_install=True)
         settings_path.write_text(json.dumps(settings), encoding='utf-8')
         main._manager.refresh()
         main._manager.refresh()
+        status, _, result = read_when_ready(body, modern)
+        assert status == 200, result
+        status, headers, result = post(initialize, common)
+        assert status == 200, result
+        legacy = dict(common, **{'Mcp-Session-Id':headers['Mcp-Session-Id'],
+                                'MCP-Protocol-Version':'2025-11-25'})
+        status, _, result = post({'jsonrpc':'2.0','method':'notifications/initialized'}, legacy)
+        assert status == 202 and result is None
+        for revision, modern_call in enumerate((False, True)):
+            package_manifest = dict(manifest.data['manifest'], namespace='InstallerSmoke',
+                                    name='Installer smoke', version='v0.0.' + str(revision))
+            package_manifest.pop('svn', None)  # 上传第三方包不强制本插件自己的清单约定。
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+                bundle.writestr('app.json', json.dumps(package_manifest).encode('utf-8'))
+                bundle.writestr('__init__.py', '')
+                bundle.writestr('main.py', '# revision ' + str(revision))
+            package_bytes = archive.getvalue()
+            digest = hashlib.sha256(package_bytes).hexdigest()
+            result = install_call({'operation':'begin','filename':'installer-smoke.opk',
+                'namespace':'InstallerSmoke','size':len(package_bytes)}, modern_call)
+            assert not result['isError'], result
+            upload_id = result['structuredContent']['upload_id']
+            for offset in range(0, len(package_bytes), 256):
+                chunk = package_bytes[offset:offset + 256]
+                result = install_call({'operation':'write','upload_id':upload_id,
+                    'offset':offset,'chunk':base64.b64encode(chunk).decode('ascii')}, modern_call)
+                assert not result['isError'], result
+                assert result['structuredContent']['offset'] == offset + len(chunk), result
+            # 新建和同 namespace 覆盖都只传新包摘要，不要求旧包摘要或修订。
+            result = install_call({'operation':'commit','upload_id':upload_id,
+                'sha256':digest}, modern_call)
+            assert not result['isError'], result
+            installed = result['structuredContent']
+            assert installed['persisted'] and not installed['loaded'], installed
+            assert installed['sha256'] == digest and installed['replaced'] == bool(revision), installed
+            assert Path('plugin/app/installer-smoke.opk').read_bytes() == package_bytes
+            metadata = files.cockpit_meta(main._context, {'filename':'installer-smoke.opk'})
+            assert not metadata.is_error and metadata.data['sha256'] == digest, metadata.data
+            assert set(loader.get_plugin_list()) == {'OlivOSCockpit'}
         rules_tool = next(tool for tool in TOOLS if tool.name == 'cockpit_intercept_rules')
         outcome = rules_tool.handler(main._context, {'operation':'set','rules':[{
             'id':'terminal-smoke','bot_hash':state['hash'],'stage':'sdk_in',

@@ -1,6 +1,7 @@
 """HTTP/MCP 服务：按配置快照监听、双时代分派、固定 8 个工作线程执行工具。"""
 
 import asyncio
+import errno
 import hashlib
 import hmac
 import inspect
@@ -34,6 +35,11 @@ from .registry import TOOLS
 HOST = '127.0.0.1'
 INTERNAL_ERROR = -32603
 _MISSING = object()
+# 配置端口被占用时只做有界的后续端口尝试；不使用 0 端口（IPv4/IPv6
+# 会得到不同临时端口），也不探测后释放或复用端口。
+PORT_FALLBACK_ATTEMPTS = 32
+FALLBACK_MIN_PORT = 1024
+PERSIST_TIMEOUT = 10.0
 
 
 class _Sessions:
@@ -138,6 +144,45 @@ def _value(obj, names, default):
         if value is not _MISSING:
             return value
     return default
+
+
+def _address_in_use(exc):
+    """仅 EADDRINUSE 允许尝试后续端口；权限/地址错误保持失败关闭。"""
+    if not isinstance(exc, OSError):
+        return False
+    codes = {errno.EADDRINUSE, getattr(errno, 'WSAEADDRINUSE', errno.EADDRINUSE)}
+    return exc.errno in codes or getattr(exc, 'winerror', None) in codes
+
+
+def _port_candidates(port):
+    """先配置端口，随后有界自增；超过 65535 回绕到 >=1024 的端口。"""
+    yield port
+    candidate = port
+    for _ in range(PORT_FALLBACK_ATTEMPTS):
+        candidate += 1
+        if candidate > 65535 or candidate < FALLBACK_MIN_PORT:
+            candidate = FALLBACK_MIN_PORT
+        yield candidate
+
+
+def _listener_ports(runner):
+    """读取已启动站点的实际端口集合；接口缺失时返回 None（无法核验）。"""
+    try:
+        addresses = getattr(runner, 'addresses', None)
+    except BaseException:
+        return None
+    if not addresses:
+        return None
+    ports = set()
+    for address in addresses:
+        try:
+            value = address[1]
+        except (TypeError, IndexError, KeyError):
+            return None
+        if type(value) is not int or not 1 <= value <= 65535:
+            return None
+        ports.add(value)
+    return ports
 
 
 def _manager_of(context):
@@ -358,6 +403,8 @@ class _Service:
         self.runner = None
         self.site = None
         self.bound = None
+        # 未托管/无临时候选时立即放行；回退候选在写回与发布确认前为 False。
+        self._serving = True
         self._dirty = False
         self._job = None
         self._closed = False
@@ -476,25 +523,32 @@ class _Service:
         if self._dirty:
             self._kick()
 
+    async def _close_site(self, site):
+        """关闭一个站点（含启动失败的半注册站点）；不吞取消。"""
+        if site is None:
+            return
+        try:
+            await site.stop()
+            server = getattr(self.runner, 'server', None)
+            if server is not None:
+                server.pre_shutdown()
+                await server.shutdown(0)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            pass
+
     async def _stop_site(self):
         site = self.site
         self.site = None
         self.bound = None
-        if site is not None:
-            try:
-                await site.stop()
-                server = getattr(self.runner, 'server', None)
-                if server is not None:
-                    server.pre_shutdown()
-                    await server.shutdown(0)
-            except asyncio.CancelledError:
-                raise
-            except BaseException:
-                pass
+        self._serving = True
+        await self._close_site(site)
 
     async def _reconcile(self):
         try:
-            snapshot = _read_snapshot(self._manager())
+            manager = self._manager()
+            snapshot = _read_snapshot(manager)
             if not _ready(snapshot):
                 # valid 但无 key 或快照失效：停止监听并清空旧会话，不匿名放行。
                 await self._stop_site()
@@ -504,6 +558,7 @@ class _Service:
             port = _value(snapshot, ('listen_port',), None)
             if (type(host_name) is not str or not host_name
                     or type(port) is not int or not 1 <= port <= 65535):
+                # 地址/端口非法是配置错误，不触发端口回退。
                 await self._stop_site()
                 self._log('Service configuration rejected; not listening.')
                 return
@@ -514,24 +569,117 @@ class _Service:
                 return
             # 先停止旧监听再绑定，避免端口复用冲突；失败即停止并明确记录。
             await self._stop_site()
-            site = web.TCPSite(self.runner, host_name, port)
-            try:
-                await site.start()
-            except asyncio.CancelledError:
-                raise
-            except BaseException:
-                self._log('Service could not listen on the configured address.')
-                return
-            self.site = site
-            self.bound = (host_name, port)
+            await self._start_site(manager, snapshot, host_name, port)
         except asyncio.CancelledError:
             raise
         except BaseException:
             self._log('Service configuration could not be applied safely.')
 
+    async def _start_site(self, manager, snapshot, host_name, configured):
+        """配置端口优先；仅 EADDRINUSE 时有界尝试后续端口。"""
+        for port in _port_candidates(configured):
+            fallback = port != configured
+            if fallback:
+                # 临时候选在写回并发布确认前不得放行 HTTP/worker/after_send。
+                self._serving = False
+            site = web.TCPSite(self.runner, host_name, port)
+            try:
+                await site.start()
+            except asyncio.CancelledError:
+                try:
+                    await self._close_site(site)
+                except asyncio.CancelledError:
+                    pass
+                raise
+            except BaseException as exc:
+                await self._close_site(site)
+                if not _address_in_use(exc):
+                    self._serving = True
+                    self._log('Service could not listen on the configured address.')
+                    return
+                continue
+            ports = _listener_ports(self.runner)
+            if ports is not None and ports != {port}:
+                # IPv4/IPv6 必须同端口；异常结果按失败关闭处理。
+                await self._close_site(site)
+                self._serving = True
+                self._log('Service listener did not bind a consistent port.')
+                return
+            self.site = site
+            self.bound = None
+            if not fallback:
+                self.bound = (host_name, port)
+                self._serving = True
+                self._log('Service listening on %s:%d.' % (host_name, port))
+                return
+            try:
+                accepted = await self._confirm_fallback(manager, snapshot, port)
+            except asyncio.CancelledError:
+                try:
+                    await self._stop_site()
+                except asyncio.CancelledError:
+                    pass
+                raise
+            if accepted:
+                self.bound = (host_name, port)
+                self._serving = True
+                self._log('Service listening on %s:%d.' % (host_name, port))
+                return
+            await self._stop_site()
+            self._log('Service could not confirm an available listening port.')
+            return
+        self._serving = True
+        self._log('Service could not find an available port near the configured one.')
+
+    async def _confirm_fallback(self, manager, snapshot, port):
+        """持有候选端口，等待配置管理器写回并在第二次观测后发布。"""
+        request = getattr(manager, 'request_listen_port', None)
+        if not callable(request):
+            # 无写回接口的旧管理路径：无法确认来源，直接接受但保持原语义。
+            return not _manager_stopped(manager)
+        expected = _value(snapshot, ('fingerprint',), None)
+        if type(expected) is not str or not expected:
+            return False
+        try:
+            future = request(port, expected)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            return False
+        if future is None:
+            return False
+        accepted = False
+        try:
+            accepted = await asyncio.wait_for(
+                asyncio.wrap_future(future), PERSIST_TIMEOUT) is True
+        except asyncio.TimeoutError:
+            accepted = False
+        except asyncio.CancelledError:
+            try:
+                future.cancel()
+            except BaseException:
+                pass
+            raise
+        finally:
+            if not accepted:
+                try:
+                    future.cancel()
+                except BaseException:
+                    pass
+        if not accepted:
+            return False
+        current = _read_snapshot(self._manager())
+        return (not self._closed and not _manager_stopped(manager)
+                and _ready(current)
+                and _value(current, ('listen_port',), None) == port)
+
     # ---- 请求处理 -------------------------------------------------------
 
     async def handle(self, request):
+        if not self._serving:
+            # 回退候选尚未写回并发布：不认证、不占 worker、不执行 after_send。
+            return await self._write(request, protocol.safe_reply(
+                None, False, 503, headers=(('Connection', 'close'),)))
         # 请求体与响应构造也占名额，不能在工具池前无界累积 1 MiB 请求。
         if not self.http_slots.acquire(blocking=False):
             return await self._write(request, protocol.safe_reply(
