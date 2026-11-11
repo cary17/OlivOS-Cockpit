@@ -62,7 +62,8 @@ http_headers = { Authorization = "Bearer <api_key>" }
 
 ```yaml
 - insert:
-    - name: '@deepseek-ai/dsh-mcp-client'
+    - id: olivos-cockpit-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
       config:
         serverName: olivos-cockpit
         transport: streamable-http
