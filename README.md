@@ -42,7 +42,35 @@ Full 与 Lite 若共用同一数据根，会共享 `control/` 下的同一组配
 
 配置每秒轮询一次，连续两次指纹一致后才发布；保存后不会立即生效，也不承诺固定时延。改端口或地址会先停旧监听再绑定；轮换 `api_key` 会使已有会话失效。文件被删除、写坏或配置无效时停止监听并清空会话，不重建模板；恢复合法配置后重新监听。
 
-**客户端**：只需配置 Streamable HTTP 地址 `http://127.0.0.1:8767/mcp` 和请求头 `Authorization: Bearer <api_key>`。服务只返回 JSON，不实现 SSE，不接受批量请求。
+**客户端接入（Streamable HTTP）**：先配置好 `api_key` 并保持 OlivOS 运行。以下使用同机默认地址，`<api_key>` 替换为 `config.json` 中的值。
+
+**[Claude Code](https://code.claude.com/docs/en/mcp-quickstart)**：在终端执行：
+
+```sh
+claude mcp add --transport http --scope user olivos-cockpit http://127.0.0.1:8767/mcp --header "Authorization: Bearer <api_key>"
+```
+
+**[Codex](https://developers.openai.com/codex/mcp)**：添加到 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.olivos-cockpit]
+url = "http://127.0.0.1:8767/mcp"
+http_headers = { Authorization = "Bearer <api_key>" }
+```
+
+**[DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/mcp/mcp-client/README.zh.md)**：追加到配置目录下的 `cordis.patch.yml`（默认 `~/.dsh/cordis.patch.yml`，保留原有配置）：
+
+```yaml
+- insert:
+    - name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: olivos-cockpit
+        transport: streamable-http
+        url: http://127.0.0.1:8767/mcp
+        headers: { Authorization: "Bearer <api_key>" }
+```
+
+配置后重开客户端；Claude Code / Codex 中输入 `/mcp` 查看连接状态。
 
 **可选 skill**：同版本 `olivos-cockpit-skill-v0.1.0.zip` 供 agent 阅读，指导其使用插件全部已发布功能。从同一 Release 下载后，将整个 `olivos-cockpit/` 目录（含 `references/`）按客户端技能机制安装。skill 不改变服务端权限；OPK 不会自动安装它。
 
