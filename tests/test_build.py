@@ -35,6 +35,8 @@ class BuildTests(unittest.TestCase):
                     self.assertIn('app.json', names)
                     self.assertIn('__init__.py', names)
                     self.assertIn('redaction.py', names)
+                    self.assertIn('LICENSE', names)
+                    self.assertEqual(archive.read('LICENSE'), (ROOT / 'LICENSE').read_bytes())
                     self.assertTrue(all('/' not in name for name in names))
                     raw = archive.read('app.json')
                     self.assertFalse(raw.startswith(b'\xef\xbb\xbf'))
@@ -72,13 +74,16 @@ class BuildTests(unittest.TestCase):
             first = path.read_bytes()
             self.assertEqual(first, builder.build_skill(directory, ROOT).read_bytes())
             source = ROOT / 'skills' / 'olivos-cockpit'
-            expected = {'olivos-cockpit/SKILL.md'} | {
+            expected = {'olivos-cockpit/SKILL.md', 'olivos-cockpit/LICENSE'} | {
                 'olivos-cockpit/references/' + item.name
                 for item in (source / 'references').glob('*.md')}
             with zipfile.ZipFile(path) as archive:
                 self.assertEqual(set(archive.namelist()), expected)
+                self.assertIn('olivos-cockpit/LICENSE', expected)
                 self.assertIn('olivos-cockpit/references/operations.md', expected)
                 self.assertIn('olivos-cockpit/references/tool-guide.md', expected)
+                self.assertEqual(archive.read('olivos-cockpit/LICENSE'),
+                                 (ROOT / 'LICENSE').read_bytes())
                 for name in expected:
                     raw = archive.read(name)
                     self.assertFalse(raw.startswith(b'\xef\xbb\xbf'), name)

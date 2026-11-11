@@ -1,6 +1,6 @@
 # OlivOS Cockpit 深度参考
 
-本文件承接安全机制、失败边界与实现契约的完整说明；README 面向使用者的最小用法，[AGENTS.md](../AGENTS.md) 面向开发 agent。文档与实现不一致时，以源码为准并顺手更正文档。
+本文件承接协议接入、工具行为、安全机制与失败边界的完整说明；README 面向真人使用者的安装、配置、风险提示与许可，[配套 skill](../skills/olivos-cockpit/SKILL.md) 指导 agent 使用全部已发布功能，[AGENTS.md](../AGENTS.md) 面向开发 agent。文档与实现不一致时，以源码为准并顺手更正文档。
 
 当前静态审阅基线：OlivOS Release 1.0.2-beta.3，commit [`c6a99fc2a3b4`](https://github.com/OlivOS-Team/OlivOS/tree/c6a99fc2a3b4cc7dd1ea8e7b6fe762b7bee7c7d4)；本插件与配套 skill 均为 `v0.1.0`，无插件自身 SVN 版本。每次源码开发的最新上游选择流程见 [AGENTS.md §8.0](../AGENTS.md#80-开发前识别最新上游源码)，不将此历史台账自动重标为新版本。
 
@@ -155,6 +155,65 @@ Cockpit 的发现与维护全部只读：
 - 会话有效性与协商版本在单锁内一次查询；过期、淘汰或 key 轮换都按未知会话返回 404。
 - 旧的固定地址入口 `service.start(...)` 已**显式弃用**（2026-11-08）：保留同名签名以便导入兼容，但调用即返回固定 `ToolError`，不再建池或监听。它没有配置快照，服务级放行与 handler 内代次/授权复核相互矛盾；请改用配置驱动的 `apply_config` / `start_managed` 入口。这是外部兼容性变化，依赖旧入口的仓库外调用方必须迁移。
 - 协议响应在 `prepare()` 后不可再改写；不承诺网络发送与配置更新是原子事务。
+
+### 客户端接入
+
+默认端点为 `http://127.0.0.1:8767/mcp`（随 `listen_host` / `listen_port` 变化），通过 Streamable HTTP 的 POST 请求接入。请求头包括：
+
+```text
+Authorization: Bearer <config.json 中的 api_key>
+Content-Type: application/json
+Accept: application/json, text/event-stream
+```
+
+服务只返回 JSON，不实现 SSE，不接受批量请求。`Origin` 存在且与 `listen_host` 不一致时返回 403（DNS rebinding 防护；不是认证）。
+
+#### 传统客户端（2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25）
+
+1. POST `initialize`（`protocolVersion`、`capabilities`、`clientInfo` 必填；未知版本协商回落到 `2025-11-25`），响应头返回 `Mcp-Session-Id`。
+2. 带会话 ID 发送 `notifications/initialized`，返回 202 空正文。
+3. 后续请求携带会话 ID 与已协商的协议版本头；版本头与协商值不一致返回 400。
+4. 会话 30 分钟过期、被淘汰、key 轮换或加载器重启后返回 404，客户端不带旧 ID 重新 `initialize`。
+
+`2024-11-05` 仅通过本服务的 POST 绑定承载；先等 SSE `endpoint` 事件的原生 HTTP+SSE 老客户端不在支持范围。
+
+#### 现代客户端（2026-07-28）
+
+每个请求携带 `_meta`，无需 `initialize` 或 `server/discover`：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/list",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    }
+  }
+}
+```
+
+同时发送 `MCP-Protocol-Version: 2026-07-28`、`Mcp-Method: tools/list`；`tools/call` 还必须发送与 `params.name` 一致、按协议编码的 `Mcp-Name`。断线重试仍逐请求携带 `_meta`，不要求重新握手。
+
+#### 常见错误
+
+| 现象 | 含义与处理 |
+| --- | --- |
+| `401` | 缺少或错误的 Bearer key；检查 `Authorization` 头 |
+| `403` | `Origin` 与 `listen_host` 不一致 |
+| `400 / -32020` | 现代必填头缺失或不一致（优先于版本错误） |
+| `400 / -32022` | 版本不在支持集（现代信封即使携带传统版本号也一样；`supported` 只含 `["2026-07-28"]`） |
+| `400 / -32602` | 缺少必需 `_meta` 字段（`protocolVersion`、`clientCapabilities`） |
+| `404 / -32601` | 未实现的 method |
+| `404`（会话） | 传统会话未知/过期/淘汰/key 轮换：重新 `initialize` |
+| `503` | 并发名额满（入口与 worker 是两套独立 8 名额），立即返回不排队 |
+| `408` | 请求体读取超时 |
+| 游标失效 | `cockpit_data` 续读游标 5 分钟过期，或文件修订/清洗上下文/配置代次变化：从头重新读取 |
+| 写超时 | 调用可能仍在执行且占用名额：**不要自动重试**，先读回状态 |
+
+工具自身失败用 `isError: true` 表示，不是 JSON-RPC 协议错误。
 
 ## 9. 验收边界与测试
 

@@ -2,7 +2,7 @@
 
 OlivOS 的 MCP 调试工具。以 OPK 插件形态运行在 OlivOS 插件加载器内，把 OlivOS 的运行状态与操作能力暴露给 AI 客户端。
 
-**文档分工**：README.md 面向使用者（安装、配置、接入）；docs/reference.md 承接深度安全机制与失败边界；interfaces.json 是固定上游版本的静态阅读台账。**本文件是开发 agent 的唯一指令来源**；与源码不一致时以源码为准，并顺手更正本文件。用户用法、逐工具参数表和接口台账数字不在本文件复述——以 registry 导出、`tools/list` schema 与 interfaces.json 为准，这里只留指针。
+**文档分工**：README.md 面向真人使用者（安装、配置、风险提示与许可）；skills/olivos-cockpit/ 面向通过 MCP 使用插件的 agent，指导使用全部已发布功能；docs/reference.md 承接协议接入、工具行为、深度安全机制与失败边界；interfaces.json 是固定上游版本的静态阅读台账。**本文件是开发 agent 的唯一指令来源**；与源码不一致时以源码为准，并顺手更正本文件。用户用法、逐工具参数表和接口台账数字不在本文件复述——以 registry 导出、`tools/list` schema 与 interfaces.json 为准，这里只留指针。
 
 设计覆盖源码运行、打包二进制和容器部署；不依赖容器入口脚本或固定安装位置。实际兼容范围以已验证的 OlivOS 版本、平台与运行环境为准。
 
@@ -19,7 +19,7 @@ OlivOS 的 MCP 调试工具。以 OPK 插件形态运行在 OlivOS 插件加载�
 - 代码兼容性优先于美观；优先使用已核实的稳定 API，非稳定属性做能力探测，缺失能力保留工具并安全失败；对上游未来版本尽力兼容，不做无限承诺。
 - MCP 开发严格按规范标准实现，复用宿主框架现有组件，尽量减少额外依赖。
 - 本插件不依赖任何其他 OlivOS 插件；依赖边界见 §3.3。
-- 交付形态：`OlivOSCockpit-<version>.opk` / `OlivOSCockpitLite-<version>.opk`，另有同版本 `olivos-cockpit-skill-<version>.zip`。数量由静态注册表导出并由构建与测试核对。逐模块组成与逐工具能力表见 registry 导出与 README；本文件不复述。
+- 交付形态：`OlivOSCockpit-<version>.opk` / `OlivOSCockpitLite-<version>.opk`，另有同版本 `olivos-cockpit-skill-<version>.zip`。数量由静态注册表导出并由构建与测试核对。工具清单与行为细节见 registry 导出与 docs/reference.md；本文件不复述。
 
 ---
 
@@ -546,6 +546,8 @@ bots           无可靠适配器状态时 connection 为 'unknown'，断线账�
                原调用次数、drop/replace_text、一致字段及非全流量覆盖均需验证
 文档一致性     README / AGENTS 的工具数与 registry 导出一致，统一使用 cockpit_ 前缀
                interfaces.json 的 tool_bindings 随 handler 移动同步首行号，上游静态审阅区不重写
+发布说明       仅明确标记的插件/skill 功能变更进入说明，内部维护与未知标题不收录
+许可分发       根 LICENSE 与两个 OPK、skill ZIP 中的许可证副本一致
 兼容性弃用     service.start 弃用为固定失败 stub 属外部兼容性变化，须单独披露
 ```
 
@@ -578,7 +580,7 @@ gh api "repos/OlivOS-Team/OlivOS/commits/$upstream_tag" --jq '{sha, html_url}'
 ```
 改一个工具          handler → ToolSpec(schema/permission/read_only) → registry.TOOLS
                     → Lite 剔除判断 → 测试 → interfaces.json tool_bindings
-                    → 文档（README 用法 / reference 行为）→ 计数核对
+                    → reference 工具行为 + skill 功能路由与使用指引（涉及安装/配置时同步 README）→ 计数核对
 改路径/写入         fs.py 安全打开原语 → files.py / file_write.py / account_write.py
                     → path_policy 回归 → 上游基线核实（§5.3）
 改协议              protocol.py 纯值层 → service.py 分派/边界 → test_protocol / test_service
@@ -608,7 +610,7 @@ python scripts/build_opk.py --output "$output"
 
 ### 8.3 新增工具的完整层清单
 
-handler（模块内，含权限/只读元数据）→ ToolSpec（schema、required_permission、read_only）→ 加入对应 TOOLS 元组 → registry.TOOLS（Full）与 Lite 剔除判断（`profiles/lite_registry.py` 不含写模块；Lite 可用的共享工具单独确认）→ 测试（单元 + HTTP + 必要时真实加载器）→ interfaces.json tool_bindings（handler、首行号、权限、profile、测试映射）→ README 用法表 / docs/reference.md 行为细节 → 全量测试与构建核对计数与排序。
+handler（模块内，含权限/只读元数据）→ ToolSpec（schema、required_permission、read_only）→ 加入对应 TOOLS 元组 → registry.TOOLS（Full）与 Lite 剔除判断（`profiles/lite_registry.py` 不含写模块；Lite 可用的共享工具单独确认）→ 测试（单元 + HTTP + 必要时真实加载器）→ interfaces.json tool_bindings（handler、首行号、权限、profile、测试映射）→ docs/reference.md 行为细节 + skill 功能路由与使用指引（涉及安装/配置时同步 README）→ 全量测试与构建核对计数与排序。
 
 ### 8.4 常见陷阱
 
@@ -620,8 +622,14 @@ handler（模块内，含权限/只读元数据）→ ToolSpec（schema、requir
 
 ### 8.5 人工发布与版本同步
 
-`.github/workflows/release.yml` 仅允许 `workflow_dispatch`，从 main 人工输入版本；不添加 push、tag、release 或定时发版触发器。`scripts/build_opk.py` 复用同一打包入口生成 Full/Lite OPK 与完整 skill ZIP，只有这三个附件；构建输出用临时目录，不把归档、dist 或缓存提交到仓库，也不捆绑宿主或其他插件。
+`.github/workflows/release.yml` 仅允许 `workflow_dispatch`；待发布源码放到 GitHub 的 main 后，在 **Actions → Release → Run workflow** 选择 main、输入版本并人工运行，不添加 push、tag、release 或定时发版触发器。`scripts/build_opk.py` 复用同一打包入口生成 Full/Lite OPK 与完整 skill ZIP，只有这三个附件；构建输出用临时目录，不把归档、dist 或缓存提交到仓库，也不捆绑宿主或其他插件。
+
+本项目代码与配套 skill 采用 `AGPL-3.0-or-later`，根 `LICENSE` 为完整许可证文本；两个 OPK 的 `LICENSE` 与 skill ZIP 的 `olivos-cockpit/LICENSE` 必须携带同一副本。README 首次提及 OlivOS 时链接上游以声明来源；第三方项目及素材仍遵循各自许可。
 
 发版时同步 `OlivOSCockpit/app.json` 的 version、`contracts.VERSION`、`skills/olivos-cockpit/SKILL.md` 的 metadata.version 与版本文案，再更新 README 附件名和相关测试；三者与人工输入版本必须完全一致。版本使用 `vX.Y.Z` 或带预发布后缀的形式，不添加自身 svn；宿主兼容字段与宿主 SVN 查询不受影响。
 
-`scripts/release.py` 在测试前预留固定 commit 的草稿，上传前后检查原 Release ID，并只发布这份草稿；已公开版本或 tag 指向不同 commit 时拒绝覆盖。草稿被删除后旧任务重跑不得重建，重新人工触发才允许创建。说明仅简述新增、优化、修复，首版列已有功能；比较起点来自仍公开的 Release，不能以最近 tag、被撤回版本或草稿代替。使用 `feat:` / `fix:` / `perf:` / `refactor:` 等清楚的提交标题，避免把内部构建与测试记录混入功能说明。
+`scripts/release.py` 在测试前预留固定 commit 的草稿，上传前后检查原 Release ID，并只发布这份草稿；已公开版本或 tag 指向不同 commit 时拒绝覆盖。测试或构建失败保留草稿；临时故障可重跑原任务，源码修正后需删除旧草稿，从更新后的 main 重新人工触发（已有同版本 tag 必须指向本次 commit）。草稿被删除后旧任务重跑不得重建，重新人工触发才允许创建。
+
+发布说明只写插件与 skill 的功能性新增、优化、修复；首版简述已有功能。后续比较起点来自仍公开的 Release，不能以最近 tag、被撤回版本或草稿代替，撤回版本中的功能变化继续计入下次增量。
+
+仅 `feat(plugin):` / `fix(plugin):` / `perf(plugin):` 及相同的 `(skill)` scope 收录为新增、修复、优化，允许 Conventional Commit 的 `!`，标题用面向用户的一句话描述功能变化。例如 `feat(plugin): 支持插件数据续读`、`fix(skill): 修正游标失效后的处理指引`。scope 是明确的功能声明，不是改动路径：混合提交只描述其中用户可见的功能，不罗列伴随的内部维护。README、许可、开发流程、CI、构建、测试、接口台账、纯重构或单纯版本整理不使用这些功能标记；其他类型、scope、无 scope 与未知标题均忽略，不自动归为优化。没有功能条目时说明为空，不用内部改动补齐。

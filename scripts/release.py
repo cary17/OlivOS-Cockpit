@@ -50,22 +50,17 @@ def previous_release(rows, version):
 def render_notes(subjects):
     groups = {'新增': [], '优化': [], '修复': []}
     for subject in subjects:
-        match = re.fullmatch(r'(\w+)(?:\([^\n)]+\))?!?:\s*(.+)', subject)
-        if match:
-            kind, title = match.groups()
-            if kind in {'docs', 'test', 'tests', 'ci', 'build', 'chore', 'style'}:
-                continue
-            group = {'feat': '新增', '新增': '新增', '增加': '新增', '添加': '新增', '支持': '新增',
-                     'fix': '修复', '修复': '修复', '修正': '修复', '解决': '修复'}.get(kind, '优化')
-        else:
-            title = subject
-            group = ('新增' if title.startswith(('新增', '增加', '添加', '支持')) else
-                     '修复' if title.startswith(('修复', '修正', '解决')) else '优化')
+        match = re.fullmatch(r'(feat|fix|perf)\((?:plugin|skill)\)!?:\s*(.+)', subject)
+        if match is None:
+            continue
+        kind, title = match.groups()
+        title = title.strip()
+        group = {'feat': '新增', 'fix': '修复', 'perf': '优化'}[kind]
         if title and title not in groups[group]:
             groups[group].append(title)
     blocks = [f'**{group}**\n\n' + '\n'.join(f'- {title}' for title in titles)
               for group, titles in groups.items() if titles]
-    return '\n\n'.join(blocks) + '\n' if blocks else '本次无新增功能、优化或修复记录。\n'
+    return '\n\n'.join(blocks) + '\n' if blocks else ''
 
 
 def notes(repo, version, commit):

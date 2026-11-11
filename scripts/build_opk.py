@@ -111,6 +111,7 @@ def build(output, root=None):
             app['info'] = ('OlivOS MCP 调试插件 Lite：真实数据只读，另有内存虚拟终端输入；'
                            '不包含 Full-only 工具实现。')
         files = dict(common)
+        files['LICENSE'] = (root / 'LICENSE').read_bytes()
         files['app.json'] = (json.dumps(app, ensure_ascii=False, indent=4) + '\n').encode('utf-8')
         files['registry.py'] = (
             (root / 'profiles' / 'lite_registry.py') if lite else (source / 'registry.py')
@@ -133,7 +134,10 @@ def build_skill(output, root=None):
     references = sorted((source / 'references').glob('*.md'))
     if not references:
         raise ValueError('Skill references are missing')
-    files = {'olivos-cockpit/SKILL.md': (source / 'SKILL.md').read_bytes()}
+    files = {
+        'olivos-cockpit/SKILL.md': (source / 'SKILL.md').read_bytes(),
+        'olivos-cockpit/LICENSE': (root / 'LICENSE').read_bytes(),
+    }
     for path in references:
         files['olivos-cockpit/references/' + path.name] = path.read_bytes()
     for name, content in files.items():

@@ -35,19 +35,31 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(release.previous_release(rows, VERSION)['tag_name'], 'v0.2.0-beta.1')
         self.assertIsNone(release.previous_release([row(VERSION)], VERSION))
 
-    def test_notes_are_short_categorized_and_deduplicated(self):
-        body = release.render_notes(['feat(data): 支持数据续读', 'fix: 修复游标校验',
-                                     'perf: 减少日志扫描', 'feat: 支持数据续读',
-                                     'docs: 调整说明', 'ci: 更新 Actions', '修正账号选择',
-                                     '修复: 中文前缀修复', '新增: 中文前缀功能'])
-        self.assertIn('**新增**\n\n- 支持数据续读', body)
-        self.assertIn('**优化**\n\n- 减少日志扫描', body)
-        self.assertIn('**修复**\n\n- 修复游标校验\n- 修正账号选择\n- 中文前缀修复', body)
-        self.assertIn('**新增**\n\n- 支持数据续读\n- 中文前缀功能', body)
+    def test_notes_only_include_explicit_plugin_and_skill_features(self):
+        body = release.render_notes([
+            'feat(plugin): 支持数据续读', 'fix(plugin): 修复游标校验',
+            'perf(plugin): 减少日志扫描', 'feat(skill): 增加排障路由',
+            'fix(skill): 修正权限提示', 'perf(skill): 精简工具指引',
+            'feat(plugin)!: 调整终端输入契约', 'feat(api): 错误 scope',
+            'fix(ui): 错误 scope', 'feat: 无 scope 功能', 'fix: 无 scope 修复',
+            'docs(plugin): 更新插件说明', 'docs(skill): 更新 skill 说明',
+            'chore(plugin): 插件维护', 'chore(skill): skill 维护',
+            'ci(plugin): 更新 Actions', 'build(plugin): 调整构建',
+            'test(plugin): 补充回归', 'release(plugin): v0.2.0',
+            'license(plugin): 调整许可', 'refactor(plugin): 拆分 helper',
+            'style(plugin): 格式调整', '版本整理', '修正账号选择',
+            'feat(plugin): 支持数据续读',
+        ])
+        self.assertIn('**新增**\n\n- 支持数据续读\n- 增加排障路由\n- 调整终端输入契约', body)
+        self.assertIn('**优化**\n\n- 减少日志扫描\n- 精简工具指引', body)
+        self.assertIn('**修复**\n\n- 修复游标校验\n- 修正权限提示', body)
         self.assertEqual(body.count('支持数据续读'), 1)
-        self.assertNotIn('Actions', body)
-        self.assertNotIn('调整说明', body)
-        self.assertIn('无新增功能', release.render_notes([]))
+        for excluded in ('错误 scope', '无 scope', '更新插件说明', '更新 skill 说明',
+                         '插件维护', 'skill 维护', 'Actions', '调整构建', '补充回归',
+                         'v0.2.0', '调整许可', '拆分 helper', '格式调整',
+                         '版本整理', '修正账号选择'):
+            self.assertNotIn(excluded, body)
+        self.assertEqual(release.render_notes([]), '')
 
     def test_first_release_describes_features_without_commit_dump(self):
         with patch.object(release, 'releases', return_value=[]), patch.object(release, 'git') as git:
@@ -62,11 +74,11 @@ class ReleaseTests(unittest.TestCase):
             git('init', '--quiet')
             git('config', 'user.name', 'Release Test')
             git('config', 'user.email', 'release@example.invalid')
-            git('commit', '--quiet', '--allow-empty', '-m', 'feat: 首次功能')
+            git('commit', '--quiet', '--allow-empty', '-m', 'feat(plugin): 首次功能')
             git('tag', 'v0.0.1')
-            git('commit', '--quiet', '--allow-empty', '-m', 'feat: 撤回版本里的新功能')
+            git('commit', '--quiet', '--allow-empty', '-m', 'feat(plugin): 撤回版本里的新功能')
             git('tag', 'v0.0.2')  # Release 已撤回，tag 仍保留。
-            git('commit', '--quiet', '--allow-empty', '-m', 'fix: 后续修复')
+            git('commit', '--quiet', '--allow-empty', '-m', 'fix(plugin): 后续修复')
             with patch.object(release, 'ROOT', root), patch.object(
                     release, 'releases', return_value=[row('v0.0.1')]):
                 body = release.notes(REPO, VERSION, git('rev-parse', 'HEAD'))
