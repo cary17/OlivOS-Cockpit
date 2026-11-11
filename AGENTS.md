@@ -670,11 +670,11 @@ handler（模块内，含权限/只读元数据）→ ToolSpec（schema、requir
 
 ### 8.5 人工发布与版本同步
 
-`.github/workflows/release.yml` 仅允许 `workflow_dispatch`；待发布源码放到 GitHub 的 main 后，在 **Actions → Release → Run workflow** 选择 main、输入版本并人工运行，不添加 push、tag、release 或定时发版触发器。`scripts/build_opk.py` 复用同一打包入口生成 Full/Lite OPK 与完整 skill ZIP，只有这三个附件；构建输出用临时目录，不把归档、dist 或缓存提交到仓库，也不捆绑宿主或其他插件。
+`.github/workflows/release.yml` 仅允许 `workflow_dispatch`；待发布源码放到 GitHub 的 main 后，在 **Actions → Release → Run workflow** 选择 main 并人工运行；发布版本由工作流从 `OlivOSCockpit/app.json` 读取并校验，不再接受人工输入版本。不添加 push、tag、release 或定时发版触发器。`scripts/build_opk.py` 复用同一打包入口生成 Full/Lite OPK 与完整 skill ZIP，只有这三个附件；构建输出用临时目录，不把归档、dist 或缓存提交到仓库，也不捆绑宿主或其他插件。
 
 本项目代码与配套 skill 采用 `AGPL-3.0-or-later`，根 `LICENSE` 为完整许可证文本；两个 OPK 的 `LICENSE` 与 skill ZIP 的 `olivos-cockpit/LICENSE` 必须携带同一副本。README 首次提及 OlivOS 时链接上游以声明来源；第三方项目及素材仍遵循各自许可。
 
-发版时同步 `OlivOSCockpit/app.json` 的 version、`contracts.VERSION`、`skills/olivos-cockpit/SKILL.md` 的 metadata.version 与版本文案，再更新 README 版本说明和相关测试；三者与人工输入版本必须完全一致。版本使用 `vX.Y.Z` 或带预发布后缀的形式。`app.json` 的 `svn` 是插件自身整数清单字段（当前 `1`），不随版本号推导，也不得删除或改成字符串；`compatible_svn` 仍是独立的宿主兼容闸门，与插件自身 `svn`、发布版本互不替代。
+发版时同步 `OlivOSCockpit/app.json` 的 version、`contracts.VERSION`、`skills/olivos-cockpit/SKILL.md` 的 metadata.version 与版本文案，再更新 README 版本说明和相关测试；三者必须完全一致，发布版本取自 `OlivOSCockpit/app.json`。版本使用 `vX.Y.Z` 或带预发布后缀的形式。`app.json` 的 `svn` 是插件自身整数清单字段（当前 `1`），不随版本号推导，也不得删除或改成字符串；`compatible_svn` 仍是独立的宿主兼容闸门，与插件自身 `svn`、发布版本互不替代。
 
 `scripts/release.py` 在测试前预留固定 commit 的草稿，上传前后检查原 Release ID，并只发布这份草稿；已公开版本或 tag 指向不同 commit 时拒绝覆盖。测试或构建失败保留草稿；临时故障可重跑原任务，源码修正后需删除旧草稿，从更新后的 main 重新人工触发（已有同版本 tag 必须指向本次 commit）。草稿被删除后旧任务重跑不得重建，重新人工触发才允许创建。
 

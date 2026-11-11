@@ -2,12 +2,6 @@ name: Release
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: '发布版本，须与插件和 skill 一致（例如 v0.2.0）'
-        required: true
-        type: string
-        default: v0.2.0
 
 permissions:
   contents: read
@@ -24,7 +18,6 @@ jobs:
       contents: write
     env:
       PYTHONDONTWRITEBYTECODE: '1'
-      RELEASE_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,7 +31,11 @@ jobs:
       - name: Reserve release draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python scripts/release.py prepare --version "$RELEASE_VERSION" --state "$RUNNER_TEMP/cockpit-release.json"
+        run: |
+          set -euo pipefail
+          version="$(python -c 'from scripts.build_opk import release_version; print(release_version())')"
+          echo "Release version: $version"
+          python scripts/release.py prepare --version "$version" --state "$RUNNER_TEMP/cockpit-release.json"
       - name: Test
         run: python -m unittest discover -s tests
       - name: Build Full, Lite and skill
