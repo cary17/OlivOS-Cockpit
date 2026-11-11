@@ -30,10 +30,10 @@ metadata:
 ## 2. 以最小权限确定排查范围
 
 - 默认只读：先确定目标 namespace、账号和症状，只读取相关的小范围数据。
-- Full 的真实账号读默认允许；真实写默认关闭。Lite 的真实账号读默认关闭，开启本地配置 `lite_real_account_read` 后才允许；唯一非只读工具是 `cockpit_terminal_input`。配置键以 `config.json` 实际接受的为准，不编造未知键或引申额外权限。
+- Full 的真实账号读默认允许；真实写默认关闭。Lite 的真实账号读默认关闭，开启本地配置 `lite_real_account_read` 后才允许。`cockpit_terminal_input` 在 Full 和 Lite 都不受 `full_real_account_write` 约束，但仍须配置有效、终端账号已选中并通过调用前复核；Lite 中它是唯一非只读工具。配置键以 `config.json` 实际接受的为准，不编造未知键或引申额外权限。
 - Full-only 工具没有出现在当前工具集中时，就不能在这份安装上调用；不要猜内部候选或隐藏接口。
 - `cockpit_status`、插件元数据和纯 schema 查询可作为初查入口；账号、日志、插件数据和原生账号查询可能需要真实读权限。
-- `cockpit_raw_events` 的 Lite 输出会受选中虚拟终端范围过滤；空结果不代表全局没有流量。
+- `cockpit_raw_events` 在 Lite 中于 `lite_real_account_read` 未开启时只保留选中虚拟终端范围内的记录；开启后可观察允许范围内的真实账号事件。空结果不代表全局没有流量。
 - 发送、重载、账号/配置写入需要 Full 写权限；`cockpit_proc_get` 和 `cockpit_intercept_rules` 还需要底层权限。只读提示不是授权凭据。
 - 权限拒绝时解释缺少的能力，由维护者决定是否调整本地配置；不使用其他工具去读写 Cockpit 的控制文件。
 
