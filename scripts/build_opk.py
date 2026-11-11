@@ -94,7 +94,7 @@ def _write_archive(destination, files):
 
 def build(output, root=None):
     root = _root(root)
-    version = release_version(root)
+    release_version(root)  # 发布文件名不带版本；仍校验三方版本一致。
     source = root / 'OlivOSCockpit'
     output = Path(output)
     manifest = json.loads(_text(source / 'app.json'))
@@ -122,7 +122,7 @@ def build(output, root=None):
             for module in ('intercept.py', 'file_write.py', 'account_write.py',
                            'plugin_install.py'):
                 files[module] = (source / module).read_bytes()
-        destination = output / f'{name}-{version}.opk'
+        destination = output / f'{name}.opk'
         _write_archive(destination, files)
         paths.append(destination)
     return paths
@@ -130,7 +130,7 @@ def build(output, root=None):
 
 def build_skill(output, root=None):
     root = _root(root)
-    version = release_version(root)
+    release_version(root)  # 发布文件名不带版本；仍校验三方版本一致。
     source = root / 'skills' / 'olivos-cockpit'
     references = sorted((source / 'references').glob('*.md'))
     if not references:
@@ -147,7 +147,7 @@ def build_skill(output, root=None):
         content.decode('utf-8')
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    destination = output / f'olivos-cockpit-skill-{version}.zip'
+    destination = output / 'olivos-cockpit-skill.zip'
     _write_archive(destination, files)
     return destination
 

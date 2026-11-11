@@ -27,8 +27,8 @@
 
 | 产物 | 工具数 | 内容 |
 | --- | --- | --- |
-| `OlivOSCockpit-<version>.opk` | 62 | Full：受控读写、插件安装与底层调试 |
-| `OlivOSCockpitLite-<version>.opk` | 35 | Lite：受控只读 + 终端输入 |
+| `OlivOSCockpit.opk` | 62 | Full：受控读写、插件安装与底层调试 |
+| `OlivOSCockpitLite.opk` | 35 | Lite：受控只读 + 终端输入 |
 
 Full 与 Lite 若共用同一数据根，会共享 `control/` 下的同一组配置文件；因互斥安装，不会同时运行。两个 OPK 与配套 skill ZIP 使用同一发布版本，版本号不一致不代表某次修复已经部署。
 
@@ -89,7 +89,7 @@ http_headers = { Authorization = "Bearer <api_key>" }
 
 配置后重开客户端；Claude Code / Codex 中输入 `/mcp` 查看连接状态。
 
-**可选 skill**：同版本 `olivos-cockpit-skill-<version>.zip` 供 agent 阅读，指导其使用插件全部已发布功能。从同一 Release 下载后，将整个 `olivos-cockpit/` 目录（含 `references/`）按客户端技能机制安装。skill 不改变服务端权限；OPK 不会自动安装它。
+**可选 skill**：同版本 `olivos-cockpit-skill.zip` 供 agent 阅读，指导其使用插件全部已发布功能。从同一 Release 下载后，将整个 `olivos-cockpit/` 目录（含 `references/`）按客户端技能机制安装。skill 不改变服务端权限；OPK 不会自动安装它。
 
 **调试终端账号（使用者预置）**：在 OlivOS 账号编辑器中选择“虚拟终端”，创建使用整数 ID 的账号并启用，然后重启整个宿主；不要选“接口终端”或 FF14 模型。配置中没有 `terminal_bot_id` 字段。没有合格账号时 `cockpit_terminal_input` 明确停用并返回错误，其他只读工具不受影响。
 

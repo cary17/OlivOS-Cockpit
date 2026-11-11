@@ -123,8 +123,7 @@ def publish(repo, state_path, assets):
     endpoint = f'repos/{repo}/releases/{int(state["release_id"])}'
     check_draft(api(endpoint), version, commit)
     check_tag(repo, version, commit)
-    expected = {f'OlivOSCockpit-{version}.opk', f'OlivOSCockpitLite-{version}.opk',
-                f'olivos-cockpit-skill-{version}.zip'}
+    expected = {'OlivOSCockpit.opk', 'OlivOSCockpitLite.opk', 'olivos-cockpit-skill.zip'}
     files = list(assets.iterdir())
     if ({path.name for path in files} != expected
             or any(path.is_symlink() or not path.is_file() for path in files)):

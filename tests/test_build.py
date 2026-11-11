@@ -19,7 +19,7 @@ class BuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             paths = builder.build(directory, ROOT)
             self.assertEqual([path.name for path in paths],
-                             [f'OlivOSCockpit-{RELEASE}.opk', f'OlivOSCockpitLite-{RELEASE}.opk'])
+                             ['OlivOSCockpit.opk', 'OlivOSCockpitLite.opk'])
             first = [path.read_bytes() for path in paths]
             self.assertEqual(first, [path.read_bytes() for path in builder.build(directory, ROOT)])
             for path in paths:
@@ -71,7 +71,7 @@ class BuildTests(unittest.TestCase):
     def test_skill_archive_is_deterministic_and_complete(self):
         with tempfile.TemporaryDirectory() as directory:
             path = builder.build_skill(directory, ROOT)
-            self.assertEqual(path, Path(directory) / f'olivos-cockpit-skill-{RELEASE}.zip')
+            self.assertEqual(path, Path(directory) / 'olivos-cockpit-skill.zip')
             first = path.read_bytes()
             self.assertEqual(first, builder.build_skill(directory, ROOT).read_bytes())
             source = ROOT / 'skills' / 'olivos-cockpit'
@@ -91,8 +91,9 @@ class BuildTests(unittest.TestCase):
                     raw.decode('utf-8')
                 skill = archive.read('olivos-cockpit/SKILL.md').decode('utf-8')
                 self.assertIn(f'metadata:\n  version: {RELEASE}', skill)
-                self.assertIn(f'OlivOSCockpit-{RELEASE}.opk', skill)
-                self.assertIn(f'OlivOSCockpitLite-{RELEASE}.opk', skill)
+                self.assertIn('OlivOSCockpit.opk', skill)
+                self.assertIn('OlivOSCockpitLite.opk', skill)
+                self.assertIn('olivos-cockpit-skill.zip', skill)
                 self.assertTrue(all(info.date_time == (1980, 1, 1, 0, 0, 0)
                                     for info in archive.infolist()))
 
@@ -132,9 +133,8 @@ class BuildTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             names = [Path(line).name for line in result.stdout.splitlines() if line.strip()]
-            self.assertEqual(names, [f'OlivOSCockpit-{RELEASE}.opk',
-                                     f'OlivOSCockpitLite-{RELEASE}.opk',
-                                     f'olivos-cockpit-skill-{RELEASE}.zip'])
+            self.assertEqual(names, ['OlivOSCockpit.opk', 'OlivOSCockpitLite.opk',
+                                     'olivos-cockpit-skill.zip'])
             self.assertEqual(sorted(item.name for item in Path(directory).iterdir()), sorted(names))
 
     def test_clean_opk_import_and_first_call_after_unpacked_directory_removed(self):

@@ -149,8 +149,8 @@ class ReleaseTests(unittest.TestCase):
             root = Path(directory)
             state, assets = root / 'state.json', root / 'assets'
             assets.mkdir()
-            for name in (f'OlivOSCockpit-{VERSION}.opk', f'OlivOSCockpitLite-{VERSION}.opk',
-                         f'olivos-cockpit-skill-{VERSION}.zip'):
+            for name in ('OlivOSCockpit.opk', 'OlivOSCockpitLite.opk',
+                         'olivos-cockpit-skill.zip'):
                 (assets / name).write_bytes(b'tested archive')
             state.write_text(json.dumps({'repo': REPO, 'version': VERSION,
                                          'commit': COMMIT, 'release_id': 42}))

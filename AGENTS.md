@@ -21,7 +21,7 @@ OlivOS 的 MCP 调试工具。以 OPK 插件形态运行在 OlivOS 插件加载�
 - 代码兼容性优先于美观；优先使用已核实的稳定 API，非稳定属性做能力探测，缺失能力保留工具并安全失败；对上游未来版本尽力兼容，不做无限承诺。
 - MCP 开发严格按规范标准实现，复用宿主框架现有组件，尽量减少额外依赖。
 - 本插件不依赖任何其他 OlivOS 插件；依赖边界见 §3.3。
-- 交付形态：`OlivOSCockpit-<version>.opk` / `OlivOSCockpitLite-<version>.opk`，另有同版本 `olivos-cockpit-skill-<version>.zip`。数量由静态注册表导出并由构建与测试核对。工具清单与行为细节见 registry 导出与 docs/reference.md；本文件不复述。
+- 交付形态：`OlivOSCockpit.opk` / `OlivOSCockpitLite.opk`，另有同版本 `olivos-cockpit-skill.zip`；发布归档文件名不带版本号。数量由静态注册表导出并由构建与测试核对。工具清单与行为细节见 registry 导出与 docs/reference.md；本文件不复述。
 
 ---
 
@@ -588,7 +588,7 @@ bots           无可靠适配器状态时 connection 为 'unknown'，断线账�
                客户端本地打包/路径权限与服务器 MCP 权限分开；不上传本地任意路径、不泄露完整 base64
 文档一致性     README / AGENTS 的工具数与 registry 导出一致，统一使用 cockpit_ 前缀
                任何功能/schema/权限/失败语义变更同步 skill 使用指引与 evaluator 场景
-               README 使用 `<version>` 通用包名，不写死具体发布版本或归档名
+               README 使用固定发布包名（不带版本号），不写死具体发布版本
                app.json 保留整数 svn；compatible_svn 独立；构建版本一致性守卫不削弱
                interfaces.json 的 tool_bindings 随 handler 移动同步首行号，上游静态审阅区不重写
 发布说明       仅明确标记的插件/skill 功能变更进入说明，内部维护与未知标题不收录
