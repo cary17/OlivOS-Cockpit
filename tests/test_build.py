@@ -9,7 +9,7 @@ import unittest
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-RELEASE = 'v0.2.0'
+RELEASE = 'v0.3.0'
 _spec = importlib.util.spec_from_file_location('build_opk', ROOT / 'scripts' / 'build_opk.py')
 builder = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(builder)
@@ -44,7 +44,8 @@ class BuildTests(unittest.TestCase):
                     self.assertEqual(manifest['namespace'], 'OlivOSCockpit')
                     self.assertEqual(manifest['version'], RELEASE)
                     self.assertEqual(manifest['compatible_svn'], 190)
-                    self.assertEqual(manifest['svn'], 1)
+                    self.assertIs(type(manifest['svn']), int)
+                    self.assertEqual(manifest['svn'], 2)
                     self.assertEqual('full_only.py' in names, not lite)
                     self.assertEqual('adapter_tools.py' in names, not lite)
                     for module in ('file_write.py', 'account_write.py', 'intercept.py',
@@ -105,10 +106,10 @@ class BuildTests(unittest.TestCase):
             'skills/olivos-cockpit/SKILL.md': ROOT / 'skills' / 'olivos-cockpit' / 'SKILL.md',
         }
         cases = (
-            ('OlivOSCockpit/app.json', '"version": "v0.2.0"', '"version": "v0.2.1"'),
-            ('OlivOSCockpit/app.json', '"version": "v0.2.0"', '"version": "0.2.0"'),
-            ('OlivOSCockpit/contracts.py', "VERSION = 'v0.2.0'", "VERSION = 'v0.2.1'"),
-            ('skills/olivos-cockpit/SKILL.md', 'version: v0.2.0', 'version: v0.2.1'),
+            ('OlivOSCockpit/app.json', '"version": "v0.3.0"', '"version": "v0.3.1"'),
+            ('OlivOSCockpit/app.json', '"version": "v0.3.0"', '"version": "0.3.0"'),
+            ('OlivOSCockpit/contracts.py', "VERSION = 'v0.3.0'", "VERSION = 'v0.3.1'"),
+            ('skills/olivos-cockpit/SKILL.md', 'version: v0.3.0', 'version: v0.3.1'),
         )
         for relative, old, new in cases:
             with self.subTest(relative=relative, replacement=new), \
@@ -152,7 +153,7 @@ import zipfile
 archive_path, mode = sys.argv[1], sys.argv[2]
 FULL_ONLY = {'cockpit_send', 'cockpit_reload', 'cockpit_proc_get'}
 with tempfile.TemporaryDirectory() as directory:
-    base = Path(directory)
+    base = Path(os.path.realpath(directory))
     package = base / 'OlivOSCockpit'
     package.mkdir()
     with zipfile.ZipFile(archive_path) as archive:

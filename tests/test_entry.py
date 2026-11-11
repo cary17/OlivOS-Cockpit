@@ -187,11 +187,12 @@ class EntryTests(unittest.TestCase):
 
     def test_config_supervision_waits_for_key_and_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
-            data_root = os.path.join(directory, 'data')
+            root = os.path.realpath(directory)
+            data_root = os.path.join(root, 'data')
             os.makedirs(data_root)
             manager = config.ConfigManager(data_root, 'full')
             # 首次加载前建立空上下文，模拟宿主 init 时的默认快照。
-            context = Context(self.proc, directory, data_root, host_stub())
+            context = Context(self.proc, root, data_root, host_stub())
             applied, apply = wire(context, manager)
             with patch.object(main.service, 'apply_config', apply), \
                     patch.object(main, '_target', (context, manager)), \

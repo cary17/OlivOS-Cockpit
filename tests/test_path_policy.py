@@ -51,7 +51,7 @@ class PathPolicyTests(unittest.TestCase):
 
     def fd(self, path=None):
         fd = fs.open_root(str(path or self.root), context=self.ctx)
-        self.addCleanup(os.close, fd)
+        self.addCleanup(fs.close, fd)
         return fd
 
     def deny(self, *paths):
@@ -81,7 +81,7 @@ class PathPolicyTests(unittest.TestCase):
         try:
             raw, _, _ = fs.read_at(root, 'OlivOSCockpit/control/config.json')
         finally:
-            os.close(root)
+            fs.close(root)
         self.assertIn(b'private', raw)
         manager = config.ConfigManager(str(self.data))
         manager.refresh()
@@ -176,9 +176,9 @@ class PathPolicyTests(unittest.TestCase):
         (self.ns / 'x').write_bytes(b'private')
         parent = self.fd(self.ns)
         fd, _ = fs.open_rel(parent, 'x')
-        self.addCleanup(os.close, fd)
+        self.addCleanup(fs.close, fd)
         self.deny(str(self.ns / 'x'))
-        with patch.object(os, 'read') as read:
+        with patch.object(fs, 'read') as read:
             with self.assertRaises(contracts.ToolError):
                 fs.read_fd(fd)
             read.assert_not_called()
@@ -189,7 +189,10 @@ class PathPolicyTests(unittest.TestCase):
     def test_hard_link_aliases_filtered_from_data_logs_and_packages(self):
         secret = self.control / config.CONFIG_NAME
         for path in (self.ns / 'alias.json', self.logs / 'private.log', self.app / 'private.opk'):
-            os.link(secret, path)
+            try:
+                os.link(secret, path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest('hard links are unavailable: ' + str(exc))
             with self.assertRaises(contracts.ToolError):
                 fs.authorize_path(self.ctx, str(path))
         entries = files.cockpit_data(self.ctx, {'namespace': 'Demo'}).data['entries']
@@ -223,7 +226,10 @@ class PathPolicyTests(unittest.TestCase):
         with self.assertRaises(contracts.ToolError):
             files.cockpit_plugins(replace(self.ctx, olivos=None), {})
         link = Path(os.path.realpath(outside.name)) / 'link'
-        link.symlink_to(external, target_is_directory=True)
+        try:
+            link.symlink_to(external, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('directory symlinks are unavailable: ' + str(exc))
         with self.assertRaises(contracts.ToolError):
             files.cockpit_plugins(replace(self.ctx, olivos=host_stub(str(link))), {})
         self.deny(str(external))
@@ -255,6 +261,7 @@ class PathPolicyTests(unittest.TestCase):
         self.assertIsNone(files.TOOLS[0].required_permission)
         self.assertIsNone(files.TOOLS[3].required_permission)
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX os.open dir_fd race injection')
     def test_leaf_swapped_to_symlink_or_hardlink_never_reads_secret(self):
         target = self.ns / 'target'
         secret = self.control / config.CONFIG_NAME
@@ -276,7 +283,7 @@ class PathPolicyTests(unittest.TestCase):
 
             os.supports_dir_fd.add(racing_open)
             try:
-                with patch.object(os, 'open', racing_open), patch.object(os, 'read') as read:
+                with patch.object(os, 'open', racing_open), patch.object(fs, 'read') as read:
                     with self.assertRaises(contracts.ToolError):
                         fs.read_at(fd, 'target')
                     read.assert_not_called()
@@ -290,22 +297,32 @@ class PathPolicyTests(unittest.TestCase):
         nested.mkdir()
         (nested / 'ok.txt').write_bytes(b'ok')
         fd, _ = fs.open_rel(self.fd(self.ns), 'sub/ok.txt')
-        self.addCleanup(os.close, fd)
+        self.addCleanup(fs.close, fd)
         nested.rename(self.ns / 'moved')
-        nested.symlink_to(self.control, target_is_directory=True)
+        try:
+            nested.symlink_to(self.control, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('directory symlinks are unavailable: ' + str(exc))
         with self.assertRaises(contracts.ToolError):
             fs.read_fd(fd)
 
-    def test_fifo_and_missing_primitives_fail_safely(self):
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO is unavailable on this platform')
+    def test_fifo_is_rejected(self):
         pipe = self.ns / 'pipe'
-        os.mkfifo(pipe)
+        try:
+            os.mkfifo(pipe)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('FIFO creation is unavailable: ' + str(exc))
         with self.assertRaises(contracts.ToolError):
             fs.authorize_path(self.ctx, str(pipe))
         parent = self.fd(self.ns)
         with self.assertRaises(contracts.ToolError):
             fs.read_at(parent, 'pipe')
+
+    def test_missing_primitives_fail_safely(self):
+        parent = self.fd(self.ns)
         with patch.object(fs, 'supported', return_value=False):
-            for fn, args in ((fs.authorize_path, (self.ctx, str(pipe))),
+            for fn, args in ((fs.authorize_path, (self.ctx, str(self.ns / 'missing'))),
                              (fs.open_root, (str(self.root), self.ctx)),
                              (fs.open_rel, (parent, 'x')), (fs.list_dir, (parent,)),
                              (fs.read_fd, (parent,))):

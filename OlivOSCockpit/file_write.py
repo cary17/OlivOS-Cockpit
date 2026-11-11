@@ -3,9 +3,9 @@
 import hashlib
 import json
 import os
+import posixpath
 import re
 import secrets
-import stat
 import threading
 
 from . import config, fs, host
@@ -33,15 +33,15 @@ def _snapshot(ctx, generation=None):
 
 
 def _identity(info):
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
-            info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
+    return ((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+             info.st_nlink) + fs.permission_identity(info))
 
 
 def _original(parent, name):
     fd, kind = fs.open_rel(parent, name)
     try:
-        info = os.fstat(fd)
-        if kind != 'file' or info.st_mode & (0o111 | stat.S_ISUID | stat.S_ISGID):
+        info = fs.fstat(fd)
+        if kind != 'file' or not fs.non_executable(info):
             raise ToolError('Only non-executable configuration files can be updated')
         if info.st_size > MAX_FILE:
             raise ToolError('Configuration file is too large')
@@ -49,11 +49,11 @@ def _original(parent, name):
         if truncated:
             raise ToolError('Configuration file is too large')
         raw.decode('utf-8', 'strict')
-        if _identity(info) != _identity(os.fstat(fd)):
+        if _identity(info) != _identity(fs.fstat(fd)):
             raise ToolError('Configuration file changed; read it again')
         return info, hashlib.sha256(raw).hexdigest()
     finally:
-        os.close(fd)
+        fs.close(fd)
 
 
 _UNVERIFIED = ('Replacement may have completed but the final state could not be verified; '
@@ -73,7 +73,7 @@ def _verify_committed(parent, name, temp_fd, content):
     except (ToolError, OSError, UnicodeError):
         return False
     try:
-        owner = os.fstat(temp_fd)
+        owner = fs.fstat(temp_fd)
     except OSError:
         return False
     if (current.st_dev, current.st_ino) != (owner.st_dev, owner.st_ino):
@@ -91,24 +91,21 @@ def _replace(ctx, parent, name, content, expected, generation, before_replace=No
     temp_fd = None
     replaced = False
     try:
-        temp_fd = os.open(temp, _TEMP_FLAGS, 0o600, dir_fd=parent)
+        temp_fd = fs.open_file(temp, _TEMP_FLAGS, 0o600, dir_fd=parent, directory=False)
         fs.authorize_path(ctx, os.path.join(parent.path, temp), write=True)
         offset = 0
         while offset < len(content):
-            written = os.write(temp_fd, content[offset:])
+            written = fs.write(temp_fd, content[offset:])
             if written <= 0:
                 raise ToolError('Configuration update failed safely')
             offset += written
-        owner = os.fstat(temp_fd)
-        if (owner.st_uid, owner.st_gid) != (original.st_uid, original.st_gid):
-            os.fchown(temp_fd, original.st_uid, original.st_gid)
-        os.fchmod(temp_fd, stat.S_IMODE(original.st_mode))
-        os.fsync(temp_fd)
+        fs.preserve_permissions(temp_fd, original)
+        fs.fsync(temp_fd)
         current, revision = _original(parent, name)
         if _identity(original) != _identity(current) or revision != expected:
             raise ToolError('Configuration file changed; read it again')
         staged, staged_revision = _original(parent, temp)
-        if (_identity(staged) != _identity(os.fstat(temp_fd))
+        if (_identity(staged) != _identity(fs.fstat(temp_fd))
                 or staged_revision != hashlib.sha256(content).hexdigest()):
             raise ToolError('Configuration staging file changed')
         if before_replace is not None:
@@ -116,15 +113,14 @@ def _replace(ctx, parent, name, content, expected, generation, before_replace=No
         fs.authorize_path(ctx, os.path.join(parent.path, name), write=True)
         _snapshot(ctx, generation)
         # shortcut: 最后复核与 replace 不是跨进程 CAS；需外部协作锁时再升级协议。
-        os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
-        # 先标记已替换，后续核验失败绝不能进入提交前清理分支（不回滚、不误删）。
+        fs.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+        # 提交后的失败不回滚，也不进入提交前清理分支。
         replaced = True
         try:
-            os.fsync(parent)
+            fs.fsync(parent)
             durability = 'synced'
         except OSError:
             durability = 'unknown'
-        # 提交后核验：确认失败不得报告成功 SHA，也不宣称原文件未变。
         if not _verify_committed(parent, name, temp_fd, content):
             raise ToolError(_UNVERIFIED)
         return Outcome({'persisted': True, 'durability': durability,
@@ -134,14 +130,14 @@ def _replace(ctx, parent, name, content, expected, generation, before_replace=No
         if temp_fd is not None:
             try:
                 if not replaced:
-                    staged = os.stat(temp, dir_fd=parent, follow_symlinks=False)
-                    owned = os.fstat(temp_fd)
+                    staged = fs.stat_at(temp, dir_fd=parent, follow_symlinks=False)
+                    owned = fs.fstat(temp_fd)
                     if (staged.st_dev, staged.st_ino) == (owned.st_dev, owned.st_ino):
-                        os.unlink(temp, dir_fd=parent)
+                        fs.unlink(temp, dir_fd=parent)
             except OSError:
                 pass
             finally:
-                os.close(temp_fd)
+                fs.close(temp_fd)
 
 
 def cockpit_plugin_file_update(ctx, args):
@@ -152,11 +148,12 @@ def cockpit_plugin_file_update(ctx, args):
             or '\x00' in namespace or ':' in namespace
             or namespace.casefold() == config.NAMESPACE_DIR.casefold()):
         raise ToolError('Invalid or protected namespace')
-    if (not relative or relative.startswith('/') or '\\' in relative or '\x00' in relative
-            or '..' in relative.split('/') or (len(relative) > 1 and relative[1] == ':')):
+    fs._component(namespace)
+    if not relative:
         raise ToolError('Invalid configuration path')
-    relative = os.path.normpath(relative)
-    if os.path.splitext(relative)[1].lower() not in _SUFFIXES:
+    fs._relative_names(relative)
+    relative = posixpath.normpath(relative)
+    if posixpath.splitext(relative)[1].lower() not in _SUFFIXES:
         raise ToolError('Unsupported configuration file suffix')
     if not _SHA256.fullmatch(args['expected_sha256']):
         raise ToolError('expected_sha256 must be a SHA-256 hex digest')
@@ -172,29 +169,28 @@ def cockpit_plugin_file_update(ctx, args):
     except (UnicodeError, ValueError, OverflowError, RecursionError):
         raise ToolError('Configuration content is not valid UTF-8 or strict JSON') from None
     fs.require()
-    if (os.rename not in os.supports_dir_fd or os.unlink not in os.supports_dir_fd
-            or not all(callable(getattr(os, name, None)) for name in ('replace', 'fchmod', 'fchown', 'fsync'))):
+    if not fs.updates_supported():
         raise ToolError('Secure file updates are not supported on this platform')
     with _WRITE_LOCK:
         _snapshot(ctx, generation)
         root = fs.open_root(ctx.data_root, context=ctx)
         try:
-            parent_rel = os.path.join(namespace, os.path.dirname(relative))
+            parent_rel = posixpath.join(namespace, posixpath.dirname(relative))
             parent, kind = fs.open_rel(root, parent_rel)
         finally:
-            os.close(root)
+            fs.close(root)
         try:
             if kind != 'dir':
                 raise ToolError('Configuration parent is not a directory')
-            fs.authorize_path(ctx, os.path.join(parent.path, os.path.basename(relative)), write=True)
-            outcome = _replace(ctx, parent, os.path.basename(relative), content,
+            fs.authorize_path(ctx, os.path.join(parent.path, posixpath.basename(relative)), write=True)
+            outcome = _replace(ctx, parent, posixpath.basename(relative), content,
                                args['expected_sha256'].lower(), generation)
             outcome.data.update(namespace=namespace, path=relative)
             return outcome
         except (OSError, UnicodeError):
             raise ToolError('Configuration update failed safely') from None
         finally:
-            os.close(parent)
+            fs.close(parent)
 
 
 TOOLS = (

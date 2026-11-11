@@ -43,7 +43,7 @@ opk, mode, token = sys.argv[1], sys.argv[2], sys.argv[3]
 FULL_ONLY = {'cockpit_send', 'cockpit_reload', 'cockpit_proc_get'}
 with tempfile.TemporaryDirectory() as directory:
     # 只有测试子进程切换 cwd；插件代码不能 chdir。
-    os.chdir(directory)
+    os.chdir(os.path.realpath(directory))
     import OlivOS
     Path('plugin/app').mkdir(parents=True, exist_ok=True)
     shutil.copyfile(opk, Path('plugin/app') / Path(opk).name)
@@ -156,7 +156,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert not loaded['truncated'] and len(loaded['plugins']) == 1, loaded
         detail = loaded['plugins'][0]
         assert detail['namespace'] == 'OlivOSCockpit', detail
-        assert detail['version'] == 'v0.2.0', detail
+        assert detail['version'] == 'v0.3.0', detail
         assert 'model' not in detail
         native = loader.plugin_models_dict['OlivOSCockpit']
         for key in ('priority', 'priority_default', 'priority_user', 'priority_effective'):
@@ -179,9 +179,10 @@ with tempfile.TemporaryDirectory() as directory:
     # 插件自身 svn 与宿主 compatible_svn 是两个独立字段。
     manifest = files.cockpit_meta(main._context, {'filename': Path(opk).name})
     assert not manifest.is_error, manifest.data
-    assert manifest.data['manifest']['version'] == 'v0.2.0', manifest.data
+    assert manifest.data['manifest']['version'] == 'v0.3.0', manifest.data
     assert manifest.data['manifest']['compatible_svn'] == 190, manifest.data
-    assert manifest.data['manifest']['svn'] == 1, manifest.data
+    assert type(manifest.data['manifest']['svn']) is int, manifest.data
+    assert manifest.data['manifest']['svn'] == 2, manifest.data
     state = main._context.terminal
     assert state['hash'] == provisioned.hash and state['bot'] is provisioned, state
     main.Event.init(None, loader)

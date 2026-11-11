@@ -88,7 +88,7 @@ def _read_at(parent, name, optional=False):
         fs._path_policy(parent.context, os.path.join(parent.path, name))
         fs._check_fd(parent)
         try:
-            os.stat(name, dir_fd=parent, follow_symlinks=False)
+            fs.stat_at(name, dir_fd=parent, follow_symlinks=False)
         except FileNotFoundError:
             fs._check_fd(parent)
             return None
@@ -96,17 +96,17 @@ def _read_at(parent, name, optional=False):
             raise ToolError('Boot configuration is unavailable') from None
     fd, kind = fs.open_rel(parent, name)
     try:
-        info = os.fstat(fd)
+        info = fs.fstat(fd)
         if kind != 'file' or info.st_size > MAX_FILE:
             raise ToolError('Account or boot configuration is not a bounded regular file')
         raw, _, truncated = fs.read_fd(fd, MAX_FILE)
-        if truncated or _stamp(info) != _stamp(os.fstat(fd)):
+        if truncated or _stamp(info) != _stamp(fs.fstat(fd)):
             raise ToolError('Account or boot configuration changed or exceeded its limit')
         return _json(raw), hashlib.sha256(raw).hexdigest(), info
     except OSError:
         raise ToolError('Account or boot configuration is unavailable') from None
     finally:
-        os.close(fd)
+        fs.close(fd)
 
 
 def _boot_files(ctx):
@@ -116,7 +116,7 @@ def _boot_files(ctx):
         for name in _BOOT_FILES:
             fs._path_policy(ctx, os.path.join(root.path, 'conf', name))
         try:
-            os.stat('conf', dir_fd=root, follow_symlinks=False)
+            fs.stat_at('conf', dir_fd=root, follow_symlinks=False)
         except FileNotFoundError:
             fs._check_fd(root)
             return None, None
@@ -128,8 +128,8 @@ def _boot_files(ctx):
         return tuple(_read_at(parent, name, optional=True) for name in _BOOT_FILES)
     finally:
         if parent is not None:
-            os.close(parent)
-        os.close(root)
+            fs.close(parent)
+        fs.close(root)
 
 
 def _resolve(ctx):
@@ -164,8 +164,9 @@ def _resolve(ctx):
     data = model.get('data')
     path = data.get('path') if type(data) is dict else None
     if (type(path) is not str or not path or len(path) > config.MAX_PATH_CHARS
-            or '\x00' in path or '\\' in path or '..' in path.split('/')
-            or (len(path) > 1 and path[1] == ':')):
+            or '\x00' in path or '..' in path.replace('\\', '/').split('/')
+            or (not fs._WINDOWS and ('\\' in path or (len(path) > 1 and path[1] == ':')))
+            or (fs._WINDOWS and os.path.splitdrive(path)[0] and not os.path.isabs(path))):
         raise ToolError('Declared account configuration path is unsupported')
     path = os.path.normpath(path if os.path.isabs(path) else os.path.join(ctx.root, path))
     # authorize_path 只做即时预检；实际读取仍用目录 fd 安全打开并复核身份。
@@ -191,7 +192,7 @@ def cockpit_accounts_config(ctx, args):
     try:
         document, revision, _ = _read(parent, os.path.basename(path))
     finally:
-        os.close(parent)
+        fs.close(parent)
     if not _permitted(ctx):
         return failure('Account access policy changed; retry with the current policy')
     accounts = document['account']

@@ -121,7 +121,7 @@ def _new_state(ctx, filename, namespace, size):
     if not _permitted(ctx):
         raise ToolError('Installing plugin packages is not permitted')
     root = fs.open_package_root(ctx)
-    os.close(root)
+    fs.close(root)
     return {
         'id': secrets.token_urlsafe(32),
         'owner': owner,
@@ -582,7 +582,7 @@ def _scan_dir(dir_fd, depth, filename, namespace, budget):
                 if kind != 'dir':
                     raise ToolError(_INCOMPLETE)
                 try:
-                    info = os.stat('app.json', dir_fd=child, follow_symlinks=False)
+                    info = fs.stat_at('app.json', dir_fd=child, follow_symlinks=False)
                 except FileNotFoundError:
                     info = None
                 except OSError:
@@ -597,7 +597,7 @@ def _scan_dir(dir_fd, depth, filename, namespace, budget):
                     _scan_manifest('source', child, 'app.json', name, namespace, budget)
             finally:
                 if child is not None:
-                    os.close(child)
+                    fs.close(child)
         else:
             # 链接或其他特殊条目可能隐藏插件，不能声称扫描完整。
             raise ToolError(_INCOMPLETE)
@@ -630,7 +630,7 @@ def _scan_manifest(kind, dir_fd, relative, fallback, namespace, budget):
 
 def _target_exists(root, filename):
     try:
-        info = os.stat(filename, dir_fd=root, follow_symlinks=False)
+        info = fs.stat_at(filename, dir_fd=root, follow_symlinks=False)
     except FileNotFoundError:
         return False
     except OSError:
@@ -655,7 +655,7 @@ def _temp_file(root):
     temp = '.cockpit-install-' + secrets.token_hex(16) + '.tmp'
     fd = None
     try:
-        fd = os.open(temp, _TEMP_FLAGS, 0o600, dir_fd=root)
+        fd = fs.open_file(temp, _TEMP_FLAGS, 0o600, dir_fd=root, directory=False)
         return temp, fd
     except OSError:
         raise ToolError(_WRITE_FAILED) from None
@@ -665,14 +665,14 @@ def _write_temp(root, temp, fd, data):
     try:
         offset = 0
         while offset < len(data):
-            written = os.write(fd, data[offset:])
+            written = fs.write(fd, data[offset:])
             if written <= 0:
                 raise ToolError(_WRITE_FAILED)
             offset += written
-        info = os.fstat(fd)
+        info = fs.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise ToolError(_WRITE_FAILED)
-        os.fsync(fd)
+        fs.fsync(fd)
     except ToolError:
         raise
     except OSError:
@@ -682,16 +682,16 @@ def _write_temp(root, temp, fd, data):
 def _publish(root, filename, temp, overwrite):
     try:
         if overwrite:
-            os.replace(temp, filename, src_dir_fd=root, dst_dir_fd=root)
+            fs.replace(temp, filename, src_dir_fd=root, dst_dir_fd=root)
             return True
         try:
-            os.link(temp, filename, src_dir_fd=root, dst_dir_fd=root)
+            fs.link(temp, filename, src_dir_fd=root, dst_dir_fd=root)
         except FileExistsError:
             raise ToolError('Another package appeared at the target path; nothing was overwritten') from None
         except OSError:
             raise ToolError(_WRITE_FAILED) from None
         try:
-            os.unlink(temp, dir_fd=root)
+            fs.unlink(temp, dir_fd=root)
         except OSError:
             pass
         return False
@@ -705,10 +705,10 @@ def _cleanup_temp(root, temp, fd):
     if temp is None:
         return
     try:
-        staged = os.stat(temp, dir_fd=root, follow_symlinks=False)
-        owned = os.fstat(fd)
+        staged = fs.stat_at(temp, dir_fd=root, follow_symlinks=False)
+        owned = fs.fstat(fd)
         if (staged.st_dev, staged.st_ino) == (owned.st_dev, owned.st_ino):
-            os.unlink(temp, dir_fd=root)
+            fs.unlink(temp, dir_fd=root)
     except OSError:
         pass
 
@@ -721,8 +721,8 @@ def _verify(root, filename, fd, digest, size):
     try:
         if kind != 'file':
             return False
-        current = os.fstat(target)
-        owner = os.fstat(fd)
+        current = fs.fstat(target)
+        owner = fs.fstat(fd)
         if (current.st_dev, current.st_ino) != (owner.st_dev, owner.st_ino):
             return False
         data, total, truncated = fs.read_fd(target, MAX_OPK)
@@ -732,7 +732,7 @@ def _verify(root, filename, fd, digest, size):
     except (ToolError, OSError):
         return False
     finally:
-        os.close(target)
+        fs.close(target)
 
 
 def _install(ctx, state, data, digest):
@@ -757,7 +757,7 @@ def _install(ctx, state, data, digest):
             _authorize(ctx, state)
             replaced = _publish(root, state['filename'], temp, initial_exists)
             try:
-                os.fsync(root)
+                fs.fsync(root)
                 durability = 'synced'
             except OSError:
                 durability = 'unknown'
@@ -777,25 +777,17 @@ def _install(ctx, state, data, digest):
         finally:
             _cleanup_temp(root, temp, temp_fd) if temp_fd is not None else None
             if temp_fd is not None:
-                os.close(temp_fd)
+                fs.close(temp_fd)
     except ToolError:
         raise
     except (OSError, UnicodeError, ValueError):
         raise ToolError(_WRITE_FAILED) from None
     finally:
-        os.close(root)
+        fs.close(root)
 
 
 def _tool_ready():
-    return (fs.supported()
-            and all(callable(getattr(os, name, None))
-                    for name in ('open', 'write', 'fsync', 'replace', 'link', 'stat', 'unlink'))
-            and os.open in os.supports_dir_fd
-            and os.link in os.supports_dir_fd
-            and os.unlink in os.supports_dir_fd
-            and os.stat in os.supports_dir_fd
-            and os.stat in os.supports_follow_symlinks
-            and (os.replace in os.supports_dir_fd or os.rename in os.supports_dir_fd))
+    return fs.updates_supported()
 
 
 _SUPPORTED = _tool_ready()

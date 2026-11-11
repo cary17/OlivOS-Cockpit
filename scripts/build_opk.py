@@ -11,7 +11,7 @@ import zipfile
 VERSION_RE = re.compile(r'^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$')
 COMMON = (
     '__init__.py', 'main.py', 'contracts.py', 'config.py', 'protocol.py', 'service.py',
-    'fs.py', 'files.py', 'host.py', 'terminal.py', 'redaction.py', 'raw.py',
+    'fs.py', '_winfs.py', 'files.py', 'host.py', 'terminal.py', 'redaction.py', 'raw.py',
     'raw_tools.py', 'read_tools.py', 'account_tools.py',
 )
 

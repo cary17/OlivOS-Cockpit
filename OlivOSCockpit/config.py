@@ -267,7 +267,7 @@ def _read_bounded(fd, limit):
     total = 0
     while total <= limit:
         try:
-            chunk = os.read(fd, min(65536, limit + 1 - total))
+            chunk = fs.read(fd, min(65536, limit + 1 - total))
         except OSError:
             raise ConfigError('Configuration file is unavailable') from None
         if not chunk:
@@ -281,13 +281,13 @@ def _read_bounded(fd, limit):
 
 def _read_file(dir_fd, name):
     try:
-        fd = os.open(name, _FILE_FLAGS, dir_fd=dir_fd)
+        fd = fs.open_file(name, _FILE_FLAGS, dir_fd=dir_fd, directory=False)
     except FileNotFoundError:
         raise ConfigError('Configuration file is missing') from None
     except OSError:
         raise ConfigError('Configuration file is unavailable') from None
     try:
-        info = os.fstat(fd)
+        info = fs.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise ConfigError('Configuration file type is not supported')
         if info.st_size > MAX_FILE:
@@ -297,107 +297,137 @@ def _read_file(dir_fd, name):
     except OSError:
         raise ConfigError('Configuration file is unavailable') from None
     finally:
-        os.close(fd)
+        fs.close(fd)
 
 
-def _write_temp(dir_fd, name, data):
+def _remove_temp(dir_fd, temp, fd):
+    try:
+        staged = fs.stat_at(temp, dir_fd=dir_fd, follow_symlinks=False)
+        owned = fs.fstat(fd)
+        if (staged.st_dev, staged.st_ino) == (owned.st_dev, owned.st_ino):
+            fs.unlink(temp, dir_fd=dir_fd)
+    except OSError:
+        pass
+
+
+def _write_temp(dir_fd, name, data, original_info=None):
     temp = '.' + name + '.' + secrets.token_hex(8) + '.tmp'
     try:
-        fd = os.open(temp, _WRITE_FLAGS, 0o600, dir_fd=dir_fd)
+        fd = fs.open_file(temp, _WRITE_FLAGS, 0o600, dir_fd=dir_fd, directory=False)
     except OSError:
         raise ConfigError('Configuration file is unavailable') from None
     try:
         offset = 0
         while offset < len(data):
-            try:
-                offset += os.write(fd, data[offset:])
-            except OSError:
-                raise ConfigError('Configuration file is unavailable') from None
+            written = fs.write(fd, data[offset:])
+            if written <= 0:
+                raise ConfigError('Configuration file is unavailable')
+            offset += written
+        if original_info is not None:
+            fs.preserve_permissions(fd, original_info)
+        fs.fsync(fd)
+        return temp, fd
+    except BaseException as exc:
         try:
-            os.fsync(fd)
-        except OSError:
+            _remove_temp(dir_fd, temp, fd)
+        finally:
+            fs.close(fd)
+        if isinstance(exc, OSError):
             raise ConfigError('Configuration file is unavailable') from None
-    finally:
-        os.close(fd)
-    return temp
+        raise
 
 
 def _create_new(dir_fd, name, data):
     """临时文件 + fsync；用 link 发布，绝不覆盖已存在文件。"""
-    temp = _write_temp(dir_fd, name, data)
+    temp, fd = _write_temp(dir_fd, name, data)
     try:
+        staged = fs.stat_at(temp, dir_fd=dir_fd, follow_symlinks=False)
+        owner = fs.fstat(fd)
+        if (staged.st_dev, staged.st_ino) != (owner.st_dev, owner.st_ino):
+            raise ConfigError('Configuration staging file changed')
         try:
-            os.link(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            fs.link(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except FileExistsError:
             return False
-        except OSError:
-            raise ConfigError('Configuration file is unavailable') from None
+    except OSError:
+        raise ConfigError('Configuration file is unavailable') from None
     finally:
         try:
-            os.unlink(temp, dir_fd=dir_fd)
-        except OSError:
-            pass
+            _remove_temp(dir_fd, temp, fd)
+        finally:
+            fs.close(fd)
     try:
-        os.fsync(dir_fd)
+        fs.fsync(dir_fd)
     except OSError:
         pass
     return True
 
 
 def _replace_file(dir_fd, name, data, expected_identity):
-    """用本进程临时 inode 原子替换已存在的配置；返回新身份或 None。
-
-    发布前复核源文件身份（尽力而为，不是跨进程 CAS），只删除自己创建
-    的临时文件；替换后重新读取并逐字节核验。临时文件 fsync 后才替换。
-    """
-    temp = _write_temp(dir_fd, name, data)
+    """保留原权限并原子替换；提交后核验本进程暂存对象及完整内容，不提供 CAS。"""
+    original = None
+    try:
+        original = fs.open_file(name, _FILE_FLAGS, dir_fd=dir_fd, directory=False)
+        original_info = fs.fstat(original)
+    except OSError:
+        return None
+    finally:
+        if original is not None:
+            fs.close(original)
+    if (original_info.st_dev, original_info.st_ino, original_info.st_size,
+            original_info.st_mtime_ns) != expected_identity:
+        return None
+    temp, fd = _write_temp(dir_fd, name, data, original_info)
     replaced = False
     try:
         try:
-            info = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            info = fs.stat_at(name, dir_fd=dir_fd, follow_symlinks=False)
         except OSError:
             return None
         if not stat.S_ISREG(info.st_mode):
             return None
         if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) != expected_identity:
             return None
-        try:
-            os.replace(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        except OSError:
-            raise ConfigError('Configuration file is unavailable') from None
+        staged = fs.stat_at(temp, dir_fd=dir_fd, follow_symlinks=False)
+        owner = fs.fstat(fd)
+        if (staged.st_dev, staged.st_ino) != (owner.st_dev, owner.st_ino):
+            raise ConfigError('Configuration staging file changed')
+        fs.replace(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         replaced = True
-    finally:
-        if not replaced:
-            try:
-                os.unlink(temp, dir_fd=dir_fd)
-            except OSError:
-                pass
-    try:
-        os.fsync(dir_fd)
+        try:
+            fs.fsync(dir_fd)
+        except OSError:
+            pass
+        raw, identity = _read_file(dir_fd, name)
+        if raw != data or identity[:2] != (owner.st_dev, owner.st_ino):
+            raise ConfigError('Configuration file could not be verified')
+        return identity
     except OSError:
-        pass
-    raw, identity = _read_file(dir_fd, name)
-    if raw != data:
-        raise ConfigError('Configuration file could not be verified')
-    return identity
+        raise ConfigError('Configuration file is unavailable') from None
+    finally:
+        try:
+            if not replaced:
+                _remove_temp(dir_fd, temp, fd)
+        finally:
+            fs.close(fd)
 
 
 def _child_dir(parent_fd, name, create):
     try:
-        return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        return fs.open_file(name, _DIR_FLAGS, dir_fd=parent_fd, directory=True)
     except FileNotFoundError:
         if not create:
             raise ConfigError('Configuration directory is missing') from None
     except OSError:
         raise ConfigError('Configuration directory is unavailable') from None
     try:
-        os.mkdir(name, 0o700, dir_fd=parent_fd)
+        fs.mkdir(name, 0o700, dir_fd=parent_fd)
     except FileExistsError:
         pass
     except OSError:
         raise ConfigError('Configuration directory is unavailable') from None
     try:
-        return os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        return fs.open_file(name, _DIR_FLAGS, dir_fd=parent_fd, directory=True)
     except OSError:
         raise ConfigError('Configuration directory is unavailable') from None
 
@@ -705,7 +735,7 @@ class ConfigManager:
                 request['fingerprint'] = fingerprint
         finally:
             try:
-                os.close(dir_fd)
+                fs.close(dir_fd)
             except OSError:
                 pass
 
@@ -735,18 +765,18 @@ class ConfigManager:
         try:
             ns_fd = _child_dir(root_fd, NAMESPACE_DIR, create)
         finally:
-            os.close(root_fd)
+            fs.close(root_fd)
         try:
             return _child_dir(ns_fd, CONTROL_DIR, create)
         finally:
-            os.close(ns_fd)
+            fs.close(ns_fd)
 
     def _seed(self, dir_fd):
         if self._seeded:
             # 首次加载后文件被删除或替换：不重建，按缺失安全失败。
             for name in (CONFIG_NAME, REDACTION_NAME):
                 try:
-                    os.close(os.open(name, _FILE_FLAGS, dir_fd=dir_fd))
+                    fs.close(fs.open_file(name, _FILE_FLAGS, dir_fd=dir_fd, directory=False))
                 except FileNotFoundError:
                     raise ConfigError('Configuration file is missing') from None
                 except OSError:
@@ -755,7 +785,7 @@ class ConfigManager:
         present = {}
         for name in (CONFIG_NAME, REDACTION_NAME):
             try:
-                os.close(os.open(name, _FILE_FLAGS, dir_fd=dir_fd))
+                fs.close(fs.open_file(name, _FILE_FLAGS, dir_fd=dir_fd, directory=False))
                 present[name] = True
             except FileNotFoundError:
                 present[name] = False
@@ -775,7 +805,7 @@ class ConfigManager:
             config_raw, config_id = _read_file(dir_fd, CONFIG_NAME)
             redaction_raw, redaction_id = _read_file(dir_fd, REDACTION_NAME)
         finally:
-            os.close(dir_fd)
+            fs.close(dir_fd)
         try:
             values = _config_values(_json(config_raw, 'Configuration'))
             values.update(_redaction_values(_json(redaction_raw, 'Redaction rules')))

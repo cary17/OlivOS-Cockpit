@@ -52,7 +52,7 @@ class FileWriteTests(unittest.TestCase):
         self.assertEqual(list(self.parent.glob('.cockpit-*.tmp')), [])
 
     def during_sync(self, action):
-        real = os.fsync
+        real = fs.fsync
         calls = []
 
         def fsync(fd):
@@ -62,7 +62,7 @@ class FileWriteTests(unittest.TestCase):
                 action()
             return result
 
-        return patch.object(os, 'fsync', fsync)
+        return patch.object(fs, 'fsync', fsync)
 
     def test_revision_from_complete_read_and_persistent_replace(self):
         old = self.target.stat()
@@ -70,7 +70,8 @@ class FileWriteTests(unittest.TestCase):
         outcome = self.update(expected_sha256=read.data['sha256'])
         self.assertEqual(self.target.read_text(encoding='utf-8'), self.args()['content'])
         self.assertNotEqual(self.target.stat().st_ino, old.st_ino)
-        self.assertEqual(self.target.stat().st_mode & 0o777, 0o640)
+        if os.name == 'posix':
+            self.assertEqual(self.target.stat().st_mode & 0o777, 0o640)
         self.assertTrue(outcome.data['persisted'])
         self.assertEqual(outcome.data['durability'], 'synced')
         self.assertEqual(outcome.data['namespace'], 'Demo')
@@ -81,25 +82,29 @@ class FileWriteTests(unittest.TestCase):
 
     def test_partial_writes_keep_staging_private_until_content_is_complete(self):
         content = self.args()['content'].encode('utf-8')
-        real_write, real_chmod = os.write, os.fchmod
+        real_write = fs.write
+        real_preserve = fs.preserve_permissions
         writes = []
 
         def write(fd, chunk):
-            self.assertEqual(os.fstat(fd).st_mode & 0o777, 0o600)
-            writes.append(os.fstat(fd).st_size)
+            info = fs.fstat(fd)
+            if os.name == 'posix':
+                self.assertEqual(info.st_mode & 0o777, 0o600)
+            writes.append(info.st_size)
             return real_write(fd, chunk[:4])
 
-        def chmod(fd, mode):
-            self.assertEqual(os.fstat(fd).st_size, len(content))
-            return real_chmod(fd, mode)
+        def preserve(fd, original):
+            self.assertEqual(fs.fstat(fd).st_size, len(content))
+            return real_preserve(fd, original)
 
-        with patch.object(os, 'write', write), patch.object(os, 'fchmod', chmod):
+        with patch.object(fs, 'write', write), patch.object(fs, 'preserve_permissions', preserve):
             outcome = self.update()
         self.assertGreater(len(writes), 1)
         self.assertEqual(writes[0], 0)
         self.assertTrue(outcome.data['persisted'])
         self.assertEqual(self.target.read_bytes(), content)
-        self.assertEqual(self.target.stat().st_mode & 0o777, 0o640)
+        if os.name == 'posix':
+            self.assertEqual(self.target.stat().st_mode & 0o777, 0o640)
         self.assertEqual(list(self.parent.glob('.cockpit-*.tmp')), [])
 
     def test_all_documented_text_suffixes(self):
@@ -162,10 +167,11 @@ class FileWriteTests(unittest.TestCase):
             with self.subTest(suffix=suffix), self.assertRaises(contracts.ToolError):
                 self.update(path='sub dir/中文/' + target.name)
             self.assertEqual(target.read_bytes(), self.original)
-        self.target.chmod(0o755)
-        with self.assertRaises(contracts.ToolError):
-            self.update()
-        self.assert_unchanged()
+        if os.name == 'posix':
+            self.target.chmod(0o755)
+            with self.assertRaises(contracts.ToolError):
+                self.update()
+            self.assert_unchanged()
 
     def test_content_is_bounded_utf8_and_strict_json(self):
         for content in ('NaN', 'Infinity', '{"x":1,"x":2}', '{} trailing', '\ufeff{}', '\ud800',
@@ -186,19 +192,35 @@ class FileWriteTests(unittest.TestCase):
         self.assertTrue(read.truncated)
         self.assertNotIn('sha256', read.data)
 
-    def test_symlink_fifo_and_hardlink_targets_are_rejected(self):
+    def test_symlink_target_is_rejected(self):
         outside = self.root / 'outside.json'
         outside.write_bytes(self.original)
         self.target.unlink()
-        self.target.symlink_to(outside)
+        try:
+            self.target.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('file symlinks are unavailable: ' + str(exc))
         with self.assertRaises(contracts.ToolError):
             self.update()
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO is unavailable on this platform')
+    def test_fifo_target_is_rejected(self):
         self.target.unlink()
-        os.mkfifo(self.target)
+        try:
+            os.mkfifo(self.target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('FIFO creation is unavailable: ' + str(exc))
         with self.assertRaises(contracts.ToolError):
             self.update()
+
+    def test_hardlink_target_is_rejected(self):
+        outside = self.root / 'outside.json'
+        outside.write_bytes(self.original)
         self.target.unlink()
-        os.link(outside, self.target)
+        try:
+            os.link(outside, self.target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('hard links are unavailable: ' + str(exc))
         with self.assertRaises(contracts.ToolError):
             self.update()
         self.assertEqual(outside.read_bytes(), self.original)
@@ -249,6 +271,12 @@ class FileWriteTests(unittest.TestCase):
             self.parent.rename(moved)
             self.parent.symlink_to(outside, target_is_directory=True)
 
+        probe = self.root / 'symlink-probe'
+        try:
+            probe.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('directory symlinks are unavailable: ' + str(exc))
+        probe.unlink()
         with self.during_sync(swap), self.assertRaises(contracts.ToolError):
             self.update()
         self.assertEqual((outside / self.target.name).read_bytes(), b'private')
@@ -258,6 +286,12 @@ class FileWriteTests(unittest.TestCase):
     def test_temporary_name_replacement_is_detected(self):
         outside = self.root / 'outside.json'
         outside.write_bytes(b'private')
+        probe = self.root / 'symlink-probe'
+        try:
+            probe.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('file symlinks are unavailable: ' + str(exc))
+        probe.unlink()
 
         def swap():
             temp = next(self.parent.glob('.cockpit-*.tmp'))
@@ -280,12 +314,12 @@ class FileWriteTests(unittest.TestCase):
     def test_replace_write_and_precommit_sync_failures_cleanup(self):
         for name, behavior in (('replace', {'side_effect': OSError()}),
                                ('write', {'return_value': 0}), ('fsync', {'side_effect': OSError()})):
-            with self.subTest(operation=name), patch.object(os, name, **behavior), self.assertRaises(contracts.ToolError):
+            with self.subTest(operation=name), patch.object(fs, name, **behavior), self.assertRaises(contracts.ToolError):
                 self.update()
             self.assert_unchanged()
 
     def test_directory_sync_failure_reports_actual_replacement(self):
-        real = os.fsync
+        real = fs.fsync
         calls = []
 
         def fsync(fd):
@@ -294,7 +328,7 @@ class FileWriteTests(unittest.TestCase):
                 raise OSError()
             return real(fd)
 
-        with patch.object(os, 'fsync', fsync):
+        with patch.object(fs, 'fsync', fsync):
             outcome = self.update()
         self.assertTrue(outcome.data['persisted'])
         self.assertEqual(outcome.data['durability'], 'unknown')
@@ -302,7 +336,7 @@ class FileWriteTests(unittest.TestCase):
 
     def after_replace(self, action):
         """在目录 fsync（replace 已完成、核验未开始）时机注入外部操作。"""
-        real = os.fsync
+        real = fs.fsync
         calls = []
 
         def fsync(fd):
@@ -312,7 +346,7 @@ class FileWriteTests(unittest.TestCase):
                 action()
             return result
 
-        return patch.object(os, 'fsync', fsync)
+        return patch.object(fs, 'fsync', fsync)
 
     def test_post_replace_leaf_swap_is_not_reported_as_success(self):
         outside = self.root / 'outside.json'
@@ -396,7 +430,7 @@ class FileWriteTests(unittest.TestCase):
         try:
             parent, kind = fs.open_rel(root, 'Demo/sub dir/中文')
         finally:
-            os.close(root)
+            fs.close(root)
         self.assertEqual(kind, 'dir')
         seen = []
 
@@ -409,7 +443,7 @@ class FileWriteTests(unittest.TestCase):
                 file_write._replace(self.ctx, parent, 'config.json', b'{"value":"new"}\n',
                                     expected, generation, before_replace=abort)
         finally:
-            os.close(parent)
+            fs.close(parent)
         # 回调在替换前执行，原文件仍未被覆盖，暂存文件被清理。
         self.assertEqual(seen, [self.original])
         self.assert_unchanged()
@@ -418,13 +452,13 @@ class FileWriteTests(unittest.TestCase):
         try:
             parent, _ = fs.open_rel(root, 'Demo/sub dir/中文')
         finally:
-            os.close(root)
+            fs.close(root)
         try:
             outcome = file_write._replace(self.ctx, parent, 'config.json',
                                           b'{"value":"new"}\n', expected, generation,
                                           before_replace=lambda: seen.append('ok'))
         finally:
-            os.close(parent)
+            fs.close(parent)
         self.assertEqual(seen[-1], 'ok')
         self.assertTrue(outcome.data['persisted'])
         self.assertEqual(self.target.read_text(encoding='utf-8'), '{"value":"new"}\n')
@@ -433,7 +467,7 @@ class FileWriteTests(unittest.TestCase):
         with patch.object(fs, 'supported', return_value=False), self.assertRaises(contracts.ToolError):
             self.update()
         self.assert_unchanged()
-        with patch.object(os, 'supports_dir_fd', os.supports_dir_fd - {os.rename}), self.assertRaises(contracts.ToolError):
+        with patch.object(fs, 'updates_supported', return_value=False), self.assertRaises(contracts.ToolError):
             self.update()
         self.assert_unchanged()
         self.assertEqual(len(file_write.TOOLS), 1)
@@ -441,6 +475,13 @@ class FileWriteTests(unittest.TestCase):
         self.assertEqual(spec.name, 'cockpit_plugin_file_update')
         self.assertFalse(spec.read_only)
         self.assertEqual(spec.required_permission, config.PERMISSION_REAL_ACCOUNT_WRITE)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX dir_fd capability probe')
+    def test_missing_posix_rename_dir_fd_support_fails(self):
+        with patch.object(os, 'supports_dir_fd', os.supports_dir_fd - {os.rename}), \
+                self.assertRaises(contracts.ToolError):
+            self.update()
+        self.assert_unchanged()
 
 
 if __name__ == '__main__':

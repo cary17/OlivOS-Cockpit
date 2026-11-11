@@ -23,6 +23,8 @@
 
 **依赖与安装**：Python 3.11、OlivOS 框架本身、宿主发行环境可导入的 `aiohttp`。不引入官方 MCP SDK，不依赖其他 OPK，也不依赖 OlivOS-Docker。从 GitHub Releases 下载所需版本的 OPK，放入当前实例实际使用的插件包目录（默认 `<cwd>/plugin/app/`；以宿主实际 I/O 为准），按宿主常规方式加载。
 
+**运行平台**：OPK 是与 CPU 架构无关的 Python 包，同一份 Full/Lite 包面向 Linux x64/ARM64、Windows x86/x64/ARM64 与 macOS x64/ARM64；按宿主提供 Python 3.11 和 `aiohttp` 运行，不需要按架构重新打包。Windows 文件安全后端使用系统原生接口，不增加第三方依赖，并保留路径边界、权限和失败关闭规则。自动化 CI 会在这些 OS/架构组合上运行测试和 Full/Lite 构建检查；这不等同于在每种 OlivOS 实际发行包、二进制宿主或容器中的运行验收，具体部署仍须按宿主环境核实。
+
 **Full / Lite**：两个包 `namespace` 相同，**互斥安装**。Full 默认允许真实账号读取（仍受路径、字段与资源上限约束），并提供受控写入与插件安装；Lite 默认关闭真实账号读取，需开启 `lite_real_account_read` 才允许受限文件与账号读取。Lite 在打包时剔除 Full-only 写模块，不是运行时开关。
 
 | 产物 | 工具数 | 内容 |

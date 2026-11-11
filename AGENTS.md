@@ -4,7 +4,7 @@ OlivOS 的 MCP 调试工具。以 OPK 插件形态运行在 OlivOS 插件加载�
 
 **文档分工**：README.md 面向真人使用者（安装、配置、风险提示与许可）；skills/olivos-cockpit/ 面向通过 MCP 使用插件的 agent，指导使用全部已发布功能；docs/reference.md 承接协议接入、工具行为、深度安全机制与失败边界；interfaces.json 是固定上游版本的静态阅读台账。**本文件是开发 agent 的唯一指令来源**；与源码不一致时以源码为准，并顺手更正本文件。用户用法、逐工具参数表和接口台账数字不在本文件复述——以 registry 导出、`tools/list` schema 与 interfaces.json 为准，这里只留指针。
 
-设计覆盖源码运行、打包二进制和容器部署；不依赖容器入口脚本或固定安装位置。实际兼容范围以已验证的 OlivOS 版本、平台与运行环境为准。
+设计覆盖源码运行、打包二进制和容器部署；不依赖容器入口脚本或固定安装位置。目标平台矩阵为 Linux x64/ARM64、Windows x86/x64/ARM64、macOS x64/ARM64，Full/Lite OPK 不按 CPU 架构拆包；Python 运行时要求仍为 3.11。自动化矩阵结果不代替对应 OlivOS 发行包、容器或真实宿主的运行验收，兼容性声明以已验证的宿主版本、平台与运行环境为准。
 
 同时支持 MCP 的两个时代：**现代**（2026-07-28，无握手、无状态）与**传统**（2025-11-25 及更早，`initialize` 握手）。同一端口、同一份代码，按请求自动分派。
 
@@ -248,7 +248,7 @@ namespace 只允许单个目录名；拒绝绝对路径、"."、".."、路径分
 符号链接不得越界，路径校验与实际打开之间的链接替换也不得绕过边界
 ```
 
-首版使用 POSIX 目录句柄逐组件安全打开，保守拒绝所有符号链接（包括根的祖先目录）。缺少所需安全打开原语的平台仅禁用文件读取能力并返回明确错误，工具仍在列表中；不得以存在竞态的 `resolve` 后 `open` 替代。跨平台支持以实际验收为准。
+文件操作由 `fs.py` 按平台选择安全后端：POSIX 使用目录句柄逐组件打开，Windows 使用句柄相对的原生打开与提交操作；两者都拒绝越界链接替换及根祖先中的链接/reparse point，不以 `resolve` 后 `open` 降级。句柄在 Windows 上是不透明值，所有操作必须经 `fs` 门面，不假设句柄是整数或可直接传给 `os.*`。基础后端不可用且影响控制文件/配置初始化时，配置 fail-closed，服务不监听，客户端也无法取得工具列表；只有服务已就绪而个别文件操作能力缺失时，才保留相应工具并返回结构化错误。跨平台与宿主兼容范围按测试和实际部署验收声明。
 
 **插件安装层（仅 Full）** — `cockpit_plugin_install` 是普通文件写入禁令的专用窄例外：
 
@@ -638,7 +638,7 @@ gh api "repos/OlivOS-Team/OlivOS/commits/$upstream_tag" --jq '{sha, html_url}'
 
 ### 8.2 定点与全量命令
 
-在具备宿主发行依赖（含 `aiohttp`）的 Python 3.11 环境从仓库根目录执行：
+在具备宿主发行依赖（含 `aiohttp`）的 Python 3.11 环境从仓库根目录执行。`.github/workflows/test.yml` 在 Linux x64/ARM64、Windows x86/x64/ARM64 与 macOS x64/ARM64 上运行完整测试、临时目录 Full/Lite/skill 构建及 Lite 剔除核对；它只读仓库，不发布归档。CI 的通过结果不替代真实 OlivOS 宿主、目标发行包或容器验收。
 
 ```bash
 # 定点回归（按改动文件选择，不为每个条目跑整套）
@@ -674,7 +674,7 @@ handler（模块内，含权限/只读元数据）→ ToolSpec（schema、requir
 
 本项目代码与配套 skill 采用 `AGPL-3.0-or-later`，根 `LICENSE` 为完整许可证文本；两个 OPK 的 `LICENSE` 与 skill ZIP 的 `olivos-cockpit/LICENSE` 必须携带同一副本。README 首次提及 OlivOS 时链接上游以声明来源；第三方项目及素材仍遵循各自许可。
 
-发版时同步 `OlivOSCockpit/app.json` 的 version、`contracts.VERSION`、`skills/olivos-cockpit/SKILL.md` 的 metadata.version 与版本文案，再更新 README 版本说明和相关测试；三者必须完全一致，发布版本取自 `OlivOSCockpit/app.json`。版本使用 `vX.Y.Z` 或带预发布后缀的形式。`app.json` 的 `svn` 是插件自身整数清单字段（当前 `1`），不随版本号推导，也不得删除或改成字符串；`compatible_svn` 仍是独立的宿主兼容闸门，与插件自身 `svn`、发布版本互不替代。
+发版时同步 `OlivOSCockpit/app.json` 的 version、`contracts.VERSION`、`skills/olivos-cockpit/SKILL.md` 的 metadata.version 与版本文案，再更新 README 版本说明和相关测试；三者必须完全一致，发布版本取自 `OlivOSCockpit/app.json`。版本使用 `vX.Y.Z` 或带预发布后缀的形式。`app.json` 的 `svn` 是插件自身整数清单字段（当前 `2`），不随版本号推导，也不得删除或改成字符串；`compatible_svn` 仍是独立的宿主兼容闸门，与插件自身 `svn`、发布版本互不替代。
 
 `scripts/release.py` 在测试前预留固定 commit 的草稿，上传前后检查原 Release ID，并只发布这份草稿；已公开版本或 tag 指向不同 commit 时拒绝覆盖。测试或构建失败保留草稿；临时故障可重跑原任务，源码修正后需删除旧草稿，从更新后的 main 重新人工触发（已有同版本 tag 必须指向本次 commit）。草稿被删除后旧任务重跑不得重建，重新人工触发才允许创建。
 

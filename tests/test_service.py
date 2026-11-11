@@ -945,7 +945,8 @@ class ManagedPortFallbackTests(unittest.TestCase):
     def test_occupied_port_falls_back_persists_and_serves_both_eras(self):
         temp = tempfile.TemporaryDirectory(prefix='cockpit-managed-')
         self.addCleanup(temp.cleanup)
-        data_root = os.path.join(temp.name, 'data')
+        root = os.path.realpath(temp.name)
+        data_root = os.path.join(root, 'data')
         os.makedirs(data_root)
 
         occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -980,7 +981,7 @@ class ManagedPortFallbackTests(unittest.TestCase):
                 self.messages.append(message)
 
         proc = Proc()
-        context = Context(proc, temp.name, data_root)
+        context = Context(proc, root, data_root)
         tool = ToolSpec('echo', 'echo', object_schema({'value': {'type': 'string'}}),
                         lambda ctx, args: Outcome({'echo': args.get('value', 'ok')}))
         manager.set_notify(lambda snapshot: service.apply_config(

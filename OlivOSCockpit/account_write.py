@@ -67,8 +67,7 @@ def cockpit_accounts_update(ctx, args):
     expected = args['expected_sha256'].lower()
     changes = _changes(args['changes'])
     fs.require()
-    if (os.rename not in os.supports_dir_fd or os.unlink not in os.supports_dir_fd
-            or not all(callable(getattr(os, name, None)) for name in ('replace', 'fchmod', 'fchown', 'fsync'))):
+    if not fs.updates_supported():
         raise ToolError('Secure account updates are not supported on this platform')
     with file_write._WRITE_LOCK:
         _policy(ctx, generation)
@@ -82,6 +81,12 @@ def cockpit_accounts_update(ctx, args):
             name = os.path.basename(path)
             fs.authorize_path(ctx, path, write=True)
             document, revision, original = account_tools._read(parent, name)
+            basis, patch_revision = boot_revision
+            boot_stamps = ([basis[1]] if basis[0] == 'disk' else [])
+            if patch_revision is not None:
+                boot_stamps.append(patch_revision[0])
+            if any((original.st_dev, original.st_ino) == stamp[:2] for stamp in boot_stamps):
+                raise ToolError('Boot configuration files cannot be updated as account archives')
             if revision != expected:
                 raise ToolError('Account configuration revision mismatch; read it again')
             index = args['index']
@@ -129,7 +134,7 @@ def cockpit_accounts_update(ctx, args):
         except (OSError, UnicodeError, ValueError, RecursionError):
             raise ToolError('Account configuration update failed safely') from None
         finally:
-            os.close(parent)
+            fs.close(parent)
 
 
 TOOLS = (

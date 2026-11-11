@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from OlivOSCockpit import config, contracts, files, plugin_install
+from OlivOSCockpit import config, contracts, files, fs, plugin_install
 
 MODE_FULL = contracts.MODE_FULL
 MODE_LITE = contracts.MODE_LITE
@@ -232,15 +232,15 @@ class InstallTests(Base):
 
     def test_new_target_appearing_at_link_time_is_not_clobbered(self):
         data = package(manifest_data=manifest(info='new'))
-        real_link = os.link
+        real_link = fs.link
         target = os.path.join(self.app, 'Demo.opk')
 
-        def racing_link(source, destination, *args, **kwargs):
+        def racing_link(source, destination, **kwargs):
             with open(target, 'wb') as stream:
                 stream.write(b'outer-writer')
-            return real_link(source, destination, *args, **kwargs)
+            return real_link(source, destination, **kwargs)
 
-        with patch.object(plugin_install.os, 'link', side_effect=racing_link):
+        with patch.object(fs, 'link', side_effect=racing_link):
             with self.assertRaises(ToolError):
                 self.install(data)
         with open(target, 'rb') as stream:
@@ -270,7 +270,10 @@ class InstallTests(Base):
         real = os.path.join(self.root, 'real-app')
         os.makedirs(real)
         link = os.path.join(self.root, 'linked-app')
-        os.symlink(real, link)
+        try:
+            os.symlink(real, link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('directory symlinks are unavailable: ' + str(exc))
         ctx = make_ctx(self.root, self.manager, package_path=link)
         with self.assertRaises(ToolError):
             self.begin(package(), ctx)
@@ -526,10 +529,14 @@ class ArchiveValidationTests(Base):
         self.assertFalse(outcome.is_error, outcome.data)
         self.assertTrue(outcome.data['replaced'])
 
-    def test_scan_fails_closed_on_symlink_or_malformed_existing_package(self):
-        os.symlink('/etc/passwd', os.path.join(self.app, 'Link'))
+    def test_scan_fails_closed_on_symlink(self):
+        try:
+            os.symlink('/etc/passwd', os.path.join(self.app, 'Link'))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('file symlinks are unavailable: ' + str(exc))
         self.assert_rejected(package())
-        os.unlink(os.path.join(self.app, 'Link'))
+
+    def test_scan_fails_closed_on_malformed_existing_package(self):
         self.write_existing('Broken.opk', b'not a zip')
         self.assert_rejected(package())
         os.unlink(os.path.join(self.app, 'Broken.opk'))

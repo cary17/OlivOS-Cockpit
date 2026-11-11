@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import math
-import os
 import re
 import secrets
 import time
@@ -151,14 +150,11 @@ def _check_namespace(value):
     if (type(value) is not str or not value or value in ('.', '..')
             or '/' in value or '\\' in value or '\x00' in value):
         raise ToolError('Invalid namespace')
-    return value
+    return fs._component(value)
 
 
 def _check_rel(value):
-    if type(value) is not str or '\x00' in value or value.startswith('/'):
-        raise ToolError('Invalid path')
-    if '..' in value.split('/'):
-        raise ToolError('Parent components are not allowed')
+    fs._relative_names(value)
     return value
 
 
@@ -234,7 +230,7 @@ def cockpit_plugins(ctx, args):
                     check_fd, kind = fs.open_rel(app_fd, entry['name'] + '/app.json')
                 except ToolError:
                     continue
-                os.close(check_fd)
+                fs.close(check_fd)
                 if kind != 'file':
                     continue
             if entry['type'] == 'file' and entry['size'] > MAX_OPK:
@@ -258,7 +254,7 @@ def cockpit_plugins(ctx, args):
             items.append(record)
             used += size
     finally:
-        os.close(app_fd)
+        fs.close(app_fd)
     return Outcome({'plugins': items}, truncated=more)
 
 
@@ -269,9 +265,9 @@ def cockpit_log(ctx, args):
     try:
         log_fd, kind = fs.open_rel(root, 'logfile')
     finally:
-        os.close(root)
+        fs.close(root)
     if kind != 'dir':
-        os.close(log_fd)
+        fs.close(log_fd)
         raise ToolError('Log directory is unavailable')
     try:
         filename = args.get('filename')
@@ -288,7 +284,7 @@ def cockpit_log(ctx, args):
                 raise ToolError('No log file is available')
         data, size, cut = fs.read_tail(log_fd, entry['name'], MAX_LOG_SCAN)
     finally:
-        os.close(log_fd)
+        fs.close(log_fd)
     scanned = len(data)  # bytes_scanned 始终是实际扫描的原始字节数
     text_data = data
     if cut:
@@ -339,9 +335,9 @@ def cockpit_data(ctx, args):
     try:
         base_fd, kind = fs.open_rel(root, namespace)
     finally:
-        os.close(root)
+        fs.close(root)
     if kind != 'dir':
-        os.close(base_fd)
+        fs.close(base_fd)
         raise ToolError('Namespace directory is unavailable')
     try:
         fd, kind = fs.open_rel(base_fd, segment)
@@ -358,7 +354,7 @@ def cockpit_data(ctx, args):
                         cursor, namespace, segment, getattr(ctx, 'request_generation', None))
                     offset = state['block_start']
                     fixed_end = state['block_end'] if state['block_end'] > offset else None
-                os.close(fd)
+                fs.close(fd)
                 fd = None
                 limit = fixed_end - offset if fixed_end is not None else MAX_FILE
                 data, size, revision, more = fs.read_range(base_fd, segment, offset, limit)
@@ -399,9 +395,9 @@ def cockpit_data(ctx, args):
                             'entries': [_entry(entry) for entry in entries]}, truncated=more)
         finally:
             if fd is not None:
-                os.close(fd)
+                fs.close(fd)
     finally:
-        os.close(base_fd)
+        fs.close(base_fd)
 
 
 def _find_manifest(app_fd, namespace, ctx):
@@ -468,7 +464,7 @@ def cockpit_meta(ctx, args):
         record['manifest'] = _manifest(raw)
         return Outcome(record)
     finally:
-        os.close(app_fd)
+        fs.close(app_fd)
 
 
 TOOLS = (

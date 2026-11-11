@@ -154,7 +154,7 @@ class AccountToolsTests(unittest.TestCase):
         return target
 
     def during_sync(self, action):
-        real = os.fsync
+        real = fs.fsync
         calls = []
 
         def fsync(fd):
@@ -164,11 +164,11 @@ class AccountToolsTests(unittest.TestCase):
                 action()
             return result
 
-        return patch.object(os, 'fsync', fsync)
+        return patch.object(fs, 'fsync', fsync)
 
     def after_replace(self, action):
         """在目录 fsync（replace 已完成、核验未开始）时机注入外部操作。"""
-        real = os.fsync
+        real = fs.fsync
         calls = []
 
         def fsync(fd):
@@ -178,7 +178,7 @@ class AccountToolsTests(unittest.TestCase):
                 action()
             return result
 
-        return patch.object(os, 'fsync', fsync)
+        return patch.object(fs, 'fsync', fsync)
 
     def test_native_default_full_file_revision_disabled_and_raw_credentials(self):
         defaults = copy.deepcopy(self.sdk.default)
@@ -255,14 +255,14 @@ class AccountToolsTests(unittest.TestCase):
         self.unchanged()
 
     def test_permission_error_is_not_treated_as_missing_boot_file(self):
-        original_stat = os.stat
+        original_stat = fs.stat_at
 
-        def denied(path, *args, **kwargs):
+        def denied(path, *, dir_fd, follow_symlinks=False):
             if path == 'basic.json':
                 raise PermissionError('PRIVATE-SECRET')
-            return original_stat(path, *args, **kwargs)
+            return original_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
 
-        with patch.object(fs, 'supported', return_value=True), patch.object(os, 'stat', denied):
+        with patch.object(fs, 'supported', return_value=True), patch.object(fs, 'stat_at', denied):
             self.assertIn('unavailable', self.rejects(self.read))
         self.unchanged()
 
@@ -355,17 +355,38 @@ class AccountToolsTests(unittest.TestCase):
         self.assertTrue(self.update(ctx=context,
                                    expected_sha256=hashlib.sha256(target.read_bytes()).hexdigest()).data['persisted'])
 
-    def test_unsafe_boot_files_cannot_be_treated_as_missing(self):
+    def test_symlink_boot_files_cannot_be_treated_as_missing(self):
         real = self.another()
         for filename in ('basic.json', 'config.json'):
             path = self.conf / filename
-            path.symlink_to(real)
+            try:
+                path.symlink_to(real)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest('file symlinks are unavailable: ' + str(exc))
             self.rejects(self.read)
             path.unlink()
-            os.mkfifo(path)
+        self.unchanged()
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO is unavailable on this platform')
+    def test_fifo_boot_files_cannot_be_treated_as_missing(self):
+        for filename in ('basic.json', 'config.json'):
+            path = self.conf / filename
+            try:
+                os.mkfifo(path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest('FIFO creation is unavailable: ' + str(exc))
             self.rejects(self.read)
             path.unlink()
-            os.link(real, path)
+        self.unchanged()
+
+    def test_hardlinked_boot_files_cannot_be_treated_as_missing(self):
+        real = self.another()
+        for filename in ('basic.json', 'config.json'):
+            path = self.conf / filename
+            try:
+                os.link(real, path)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest('hard links are unavailable: ' + str(exc))
             self.rejects(self.read)
             path.unlink()
         self.unchanged()
@@ -383,9 +404,10 @@ class AccountToolsTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             path.unlink()
         self.write_json(self.conf / 'basic.json', self.boot())
-        self.target.chmod(0o755)
-        self.rejects(self.update)
-        self.unchanged()
+        if os.name == 'posix':
+            self.target.chmod(0o755)
+            self.rejects(self.update)
+            self.unchanged()
 
     def test_boot_path_case_variants_are_rejected_before_opening_for_update(self):
         for name in account_tools._BOOT_FILES:
@@ -400,28 +422,50 @@ class AccountToolsTests(unittest.TestCase):
                 opened.assert_not_called()
             self.unchanged()
 
-    def test_target_symlink_fifo_hardlink_and_ancestor_symlink_are_rejected(self):
+    def test_target_symlink_is_rejected(self):
         real = self.another()
         self.target.unlink()
-        self.target.symlink_to(real)
+        try:
+            self.target.symlink_to(real)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('file symlinks are unavailable: ' + str(exc))
         self.rejects(self.read)
         self.rejects(self.update)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO is unavailable on this platform')
+    def test_fifo_target_is_rejected(self):
         self.target.unlink()
-        os.mkfifo(self.target)
+        try:
+            os.mkfifo(self.target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('FIFO creation is unavailable: ' + str(exc))
         self.rejects(self.read)
         self.rejects(self.update)
+
+    def test_hardlink_target_is_rejected(self):
+        real = self.another()
         self.target.unlink()
-        os.link(real, self.target)
+        try:
+            os.link(real, self.target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('hard links are unavailable: ' + str(exc))
         self.rejects(self.read)
         self.rejects(self.update)
-        self.target.unlink()
-        self.target.write_bytes(self.original)
+        self.assertEqual(real.read_bytes(), self.original)
+
+    def test_ancestor_symlink_is_rejected(self):
         moved = self.root / 'moved-conf'
+        probe = self.root / 'symlink-probe'
+        try:
+            probe.symlink_to(moved, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('directory symlinks are unavailable: ' + str(exc))
+        probe.unlink()
         self.conf.rename(moved)
         self.conf.symlink_to(moved, target_is_directory=True)
         self.rejects(self.read)
         self.rejects(self.update)
-        self.assertEqual(real.read_bytes(), self.original)
+        self.assertEqual((moved / 'account.json').read_bytes(), self.original)
 
     def test_common_outbound_redaction_can_be_disabled_or_overridden_without_mutation(self):
         outcome = self.read()
@@ -451,7 +495,8 @@ class AccountToolsTests(unittest.TestCase):
         self.assertEqual(json.loads(self.target.read_bytes()), expected)
         self.assertEqual(args, original_args)
         self.assertNotEqual(self.target.stat().st_ino, before.st_ino)
-        self.assertEqual(self.target.stat().st_mode & 0o777, 0o640)
+        if os.name == 'posix':
+            self.assertEqual(self.target.stat().st_mode & 0o777, 0o640)
         self.assertTrue(result.data['persisted'])
         self.assertFalse(result.data['runtime_updated'])
         self.assertTrue(result.data['requires_host_restart'])
@@ -584,32 +629,42 @@ class AccountToolsTests(unittest.TestCase):
                 self.rejects(self.update)
             self.unchanged()
 
-    def test_account_identity_or_ancestor_swaps_during_staging_prevent_commit(self):
+    def test_account_identity_swap_during_staging_prevents_commit(self):
         other = self.another()
         with self.during_sync(lambda: os.replace(other, self.target)):
             self.rejects(self.update)
         self.unchanged()
+
+    def test_account_ancestor_symlink_swap_during_staging_prevents_commit(self):
         moved = self.root / 'old-conf'
+        probe = self.root / 'symlink-probe'
+        try:
+            probe.symlink_to(moved, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('directory symlinks are unavailable: ' + str(exc))
+        probe.unlink()
+
         def swap():
             self.conf.rename(moved)
             self.conf.symlink_to(moved, target_is_directory=True)
+
         with self.during_sync(swap):
             self.rejects(self.update)
         self.assertEqual((moved / 'account.json').read_bytes(), self.original)
         self.assertEqual(list(moved.glob('.cockpit-*.tmp')), [])
 
     def test_replace_failure_cleanup_and_directory_sync_reports_actual_persisted_state(self):
-        with patch.object(os, 'replace', side_effect=OSError('PRIVATE-SECRET')):
+        with patch.object(fs, 'replace', side_effect=OSError('PRIVATE-SECRET')):
             self.rejects(self.update)
         self.unchanged()
-        real_sync = os.fsync
+        real_sync = fs.fsync
         calls = []
         def fsync(fd):
             calls.append(fd)
             if len(calls) == 2:
                 raise OSError('PRIVATE-SECRET')
             return real_sync(fd)
-        with patch.object(os, 'fsync', fsync):
+        with patch.object(fs, 'fsync', fsync):
             result = self.update()
         self.assertTrue(result.data['persisted'])
         self.assertEqual(result.data['durability'], 'unknown')
@@ -722,6 +777,12 @@ class AccountToolsTests(unittest.TestCase):
         with patch.object(fs, 'supported', return_value=False):
             self.rejects(self.read)
             self.rejects(self.update)
+        with patch.object(fs, 'updates_supported', return_value=False):
+            self.rejects(self.update)
+        self.unchanged()
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX dir_fd capability probe')
+    def test_missing_posix_rename_dir_fd_support_fails(self):
         with patch.object(os, 'supports_dir_fd', os.supports_dir_fd - {os.rename}):
             self.rejects(self.update)
         self.unchanged()

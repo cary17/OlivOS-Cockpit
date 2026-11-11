@@ -1,12 +1,11 @@
-"""POSIX 只读文件原语：路径校验与打开全部经由已持有的目录 fd，不用 realpath 代替。
+"""安全文件门面：路径逐组件打开，保守拒绝符号链接及 Windows reparse point。"""
 
-v0.1 保守拒绝一切符号链接（含根祖先）。
-"""
-
+import errno
 import io
 import os
 import stat
 import struct
+import unicodedata
 import zipfile
 
 from .contracts import (MAX_ENTRIES, MAX_FILE, MAX_MANIFEST, MAX_OPK,
@@ -23,7 +22,17 @@ _CENTRAL_SIG = b'PK\x01\x02'
 _EOCD_SEARCH = 65535 + 22
 
 
+_WINDOWS = os.name == 'nt'
+if _WINDOWS:
+    # OPK 解包目录会被宿主删除；必须在模块初始化时完成 native backend 导入。
+    from . import _winfs
+else:
+    _winfs = None
+
+
 def supported():
+    if _WINDOWS:
+        return _winfs.supported()
     return (os.name == 'posix'
             and hasattr(os, 'O_NOFOLLOW')
             and hasattr(os, 'O_DIRECTORY')
@@ -34,63 +43,210 @@ def supported():
             and os.stat in os.supports_follow_symlinks)
 
 
+def updates_supported():
+    if _WINDOWS:
+        return supported()
+    return (supported() and os.rename in os.supports_dir_fd
+            and os.link in os.supports_dir_fd and os.unlink in os.supports_dir_fd
+            and all(callable(getattr(os, name, None))
+                    for name in ('replace', 'fchmod', 'fchown', 'fsync')))
+
+
+def _raw(fd):
+    return fd.handle if isinstance(fd, _FD) else fd
+
+
+def _component(name):
+    if (type(name) is not str or not name or name in ('.', '..')
+            or '/' in name or '\\' in name or '\x00' in name):
+        raise ToolError('Invalid path component')
+    if _WINDOWS:
+        stem = name.split('.', 1)[0].rstrip(' ').upper()
+        if (name[-1] in '. ' or any(ord(char) < 32 or char in ':<>"|?*' for char in name)
+                or stem in ('CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$')
+                or (len(stem) == 4 and stem[:3] in ('COM', 'LPT')
+                    and stem[3] in '123456789¹²³')):
+            raise ToolError('Invalid Windows path component')
+    return name
+
+
+def open_file(name, flags, mode=0o600, *, dir_fd=None, directory=None):
+    """低层安全打开；相对调用只收单组件，绝对路径仍逐组件验证。"""
+    if flags & getattr(os, 'O_TRUNC', 0):
+        raise OSError(errno.EINVAL, 'Truncating opens are not supported')
+    if dir_fd is None:
+        path = _absolute(name)
+        if _WINDOWS:
+            return _winfs.open_file(path, flags, mode, directory=directory)
+        parent = _walk(os.path.dirname(path), directory=True)
+        try:
+            leaf = os.path.basename(path)
+            if not leaf:
+                if directory is False or flags & (os.O_CREAT | os.O_WRONLY | os.O_RDWR):
+                    raise OSError(errno.EISDIR, 'A file name is required')
+                return dup(parent)
+            return open_file(leaf, flags, mode, dir_fd=parent, directory=directory)
+        finally:
+            close(parent)
+    _component(name)
+    if _WINDOWS:
+        return _winfs.open_file(name, flags, mode, dir_fd=_raw(dir_fd), directory=directory)
+    flags |= os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0) | os.O_NONBLOCK
+    if directory is True:
+        flags |= os.O_DIRECTORY
+    fd = os.open(name, flags, mode, dir_fd=_raw(dir_fd))
+    try:
+        info = fstat(fd)
+        if ((directory is True and not stat.S_ISDIR(info.st_mode))
+                or (directory is False and not stat.S_ISREG(info.st_mode))
+                or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))):
+            raise OSError(errno.EINVAL, 'Unsupported file type')
+        return fd
+    except BaseException:
+        close(fd)
+        raise
+
+
+def dup(fd):
+    return _winfs.dup(_raw(fd)) if _WINDOWS else os.dup(_raw(fd))
+
+
+def close(fd):
+    return _winfs.close(_raw(fd)) if _WINDOWS else os.close(_raw(fd))
+
+
+def fstat(fd):
+    return _winfs.fstat(_raw(fd)) if _WINDOWS else os.fstat(_raw(fd))
+
+
+def read(fd, size):
+    return _winfs.read(_raw(fd), size) if _WINDOWS else os.read(_raw(fd), size)
+
+
+def write(fd, data):
+    return _winfs.write(_raw(fd), data) if _WINDOWS else os.write(_raw(fd), data)
+
+
+def lseek(fd, offset, whence):
+    return (_winfs.lseek(_raw(fd), offset, whence) if _WINDOWS
+            else os.lseek(_raw(fd), offset, whence))
+
+
+def pread(fd, size, offset):
+    if _WINDOWS:
+        return _winfs.pread(_raw(fd), size, offset)
+    return os.pread(_raw(fd), size, offset)
+
+
+def scandir(fd):
+    return _winfs.scandir(_raw(fd)) if _WINDOWS else os.scandir(_raw(fd))
+
+
+def stat_at(name, *, dir_fd, follow_symlinks=False):
+    _component(name)
+    if follow_symlinks:
+        raise OSError(errno.EINVAL, 'Following links is not supported')
+    if _WINDOWS:
+        return _winfs.stat_at(name, dir_fd=_raw(dir_fd), follow_symlinks=False)
+    return os.stat(name, dir_fd=_raw(dir_fd), follow_symlinks=False)
+
+
+def mkdir(name, mode=0o700, *, dir_fd):
+    _component(name)
+    if _WINDOWS:
+        return _winfs.mkdir(name, mode, dir_fd=_raw(dir_fd))
+    return os.mkdir(name, mode, dir_fd=_raw(dir_fd))
+
+
+def unlink(name, *, dir_fd):
+    _component(name)
+    if _WINDOWS:
+        return _winfs.unlink(name, dir_fd=_raw(dir_fd))
+    return os.unlink(name, dir_fd=_raw(dir_fd))
+
+
+def link(src, dst, *, src_dir_fd, dst_dir_fd):
+    _component(src)
+    _component(dst)
+    if _WINDOWS:
+        return _winfs.link(src, dst, src_dir_fd=_raw(src_dir_fd), dst_dir_fd=_raw(dst_dir_fd))
+    return os.link(src, dst, src_dir_fd=_raw(src_dir_fd), dst_dir_fd=_raw(dst_dir_fd))
+
+
+def replace(src, dst, *, src_dir_fd, dst_dir_fd):
+    _component(src)
+    _component(dst)
+    if _WINDOWS:
+        return _winfs.replace(src, dst, src_dir_fd=_raw(src_dir_fd), dst_dir_fd=_raw(dst_dir_fd))
+    return os.replace(src, dst, src_dir_fd=_raw(src_dir_fd), dst_dir_fd=_raw(dst_dir_fd))
+
+
+def fsync(fd):
+    return _winfs.fsync(_raw(fd)) if _WINDOWS else os.fsync(_raw(fd))
+
+
+def preserve_permissions(staged_fd, original_info):
+    if _WINDOWS:
+        return _winfs.preserve_permissions(_raw(staged_fd), original_info)
+    current = fstat(staged_fd)
+    if (current.st_uid, current.st_gid) != (original_info.st_uid, original_info.st_gid):
+        os.fchown(_raw(staged_fd), original_info.st_uid, original_info.st_gid)
+    os.fchmod(_raw(staged_fd), stat.S_IMODE(original_info.st_mode))
+
+
+def permission_identity(info):
+    if _WINDOWS:
+        return (stat.S_IFMT(info.st_mode), getattr(info, '_win_attributes', 0) & 1,
+                getattr(info, '_win_security', None))
+    return info.st_mode, info.st_uid, info.st_gid
+
+
+def non_executable(info):
+    return _WINDOWS or not info.st_mode & (0o111 | stat.S_ISUID | stat.S_ISGID)
+
+
 def require():
     """没有安全原语时明确失败，而不是退化成仅字符串检查。"""
     if not supported():
         raise ToolError('Secure file access is not supported on this platform')
 
 
-class _FD(int):
-    """fd 自携策略和路径身份；os.close 原样可用，不建立全局 fd 表。"""
+class _FD(object if _WINDOWS else int):
+    """句柄自携策略与身份；POSIX 保留整数兼容，不建立全局 fd 表。"""
 
     def __new__(cls, fd, context, path, roots=None):
-        value = super().__new__(cls, fd)
+        value = object.__new__(cls) if _WINDOWS else int.__new__(cls, fd)
+        value.handle = fd
         value.context = context
         value.path = path
         # 受信包根可位于 cwd 之外；后续相对打开沿用同一授权根，不接受请求扩根。
         value.roots = None if roots is None else tuple(roots)
-        info = os.fstat(fd)
+        info = fstat(fd)
         value.identity = (info.st_dev, info.st_ino)
         return value
 
 
 def _absolute(path):
-    if (type(path) is not str or not path.startswith('/') or '\x00' in path
-            or '..' in path.split('/')):
+    if (type(path) is not str or not os.path.isabs(path) or '\x00' in path
+            or '..' in path.replace('\\', '/').split('/')):
+        raise ToolError('File root is unavailable')
+    if _WINDOWS and not os.path.splitdrive(path)[0]:
         raise ToolError('File root is unavailable')
     return os.path.normpath(path)
 
 
 def _within(path, root):
-    return os.path.commonpath((path, root)) == root
+    try:
+        return os.path.normcase(os.path.commonpath((path, root))) == os.path.normcase(root)
+    except ValueError:
+        return False
 
 
-def _path_policy(context, path, write=False, roots=None):
-    """先判路径、后做 I/O；拒绝项只收紧可信根，不能扩根。"""
-    path = _absolute(path)
-    if context is None:  # 仅配置管理器等受信内部入口和纯原语测试使用。
-        if write:
-            raise ToolError('File writes require a configuration snapshot')
-        return path
+def _blocked_paths(context):
     from . import config, host
 
-    trusted = []
-    if roots is not None:
-        # 仅由 package_root() 从宿主插件 API 解析；不是 MCP 参数。
-        trusted.extend(_absolute(value) for value in roots)
-    else:
-        for value in (getattr(context, 'root', None), getattr(context, 'data_root', None)):
-            if value:
-                trusted.append(_absolute(value))
-    if not trusted or not any(_within(path, root) for root in trusted):
-        raise ToolError('Path is outside the trusted OlivOS roots')
-    data_root = getattr(context, 'data_root', None)
-    if not data_root or config.is_protected(data_root, path):
-        raise ToolError('Path is not accessible')
-    # 保留既有 namespace 禁令；包目录里的同名插件元数据不受影响。
-    own = os.path.join(_absolute(data_root), config.NAMESPACE_DIR)
-    if _within(path.casefold(), own.casefold()):
-        raise ToolError('Path is not accessible')
+    data_root = _absolute(getattr(context, 'data_root', None))
+    blocked = [os.path.join(data_root, config.NAMESPACE_DIR)]
     current = host.snapshot(context)
     if current is host.MISSING or (current is not None and getattr(current, 'valid', True) is not True):
         raise ToolError('Path policy is unavailable')
@@ -102,14 +258,97 @@ def _path_policy(context, path, write=False, roots=None):
                 or len(entry) > config.MAX_PATH_CHARS):
             raise ToolError('Path policy is unavailable')
         if os.path.isabs(entry):
-            denied = (os.path.normpath(entry),)
+            blocked.append(os.path.normpath(entry))
         else:
             root = _absolute(getattr(context, 'root', None))
-            # 旧配置曾以插件数据根为基准；兼容只额外拒绝，绝不授权。
-            denied = (os.path.normpath(os.path.join(root, entry)),
-                      os.path.normpath(os.path.join(data_root, entry)))
-        if any(_within(path.casefold(), item.casefold()) for item in denied):
-            raise ToolError('Path is not accessible')
+            # 兼容旧配置的数据根基准只会额外拒绝，不授权。
+            blocked.extend(os.path.normpath(os.path.join(base, entry)) for base in (root, data_root))
+    return tuple(dict.fromkeys(blocked))
+
+
+def _denial_key(value):
+    return unicodedata.normalize('NFC', value).casefold()
+
+
+def _path_parts(path):
+    drive, tail = os.path.splitdrive(path)
+    return drive + os.sep, [part for part in tail.split(os.sep) if part not in ('', '.')]
+
+
+def _blocked_targets(context):
+    if context is None:
+        return ()
+    targets = []
+    for path in _blocked_paths(context):
+        path = _absolute(path)
+        fd = None
+        identities = []
+        try:
+            fd = _walk(path, identities=identities)
+            targets.append((identities[-1], ()))
+        except FileNotFoundError:
+            if identities:
+                # 未存在叶子也绑定最近现存祖先，避免其短名/Unicode 别名绕过发布前检查。
+                remaining = _path_parts(path)[1][len(identities) - 1:]
+                targets.append((identities[-1], tuple(_denial_key(part) for part in remaining)))
+        except OSError:
+            raise ToolError('Path policy identity is unavailable') from None
+        finally:
+            if fd is not None:
+                close(fd)
+    return targets
+
+
+def _unresolved_short_alias(name):
+    if not _WINDOWS:
+        return False
+    stem, separator, extension = name.partition('.')
+    prefix, tilde, number = stem.rpartition('~')
+    return (1 <= len(stem) <= 8 and bool(prefix) and bool(tilde)
+            and number.isascii() and number.isdecimal()
+            and (not separator or (1 <= len(extension) <= 3 and '.' not in extension)))
+
+
+def _identity_policy(context, identities, path, targets=None, *, write=False):
+    if context is None:
+        return
+    if targets is None:
+        targets = _blocked_targets(context)
+    names = tuple(_denial_key(part) for part in _path_parts(path)[1])
+    for blocked, remaining in targets:
+        for depth, identity in enumerate(identities):
+            if identity != blocked:
+                continue
+            if names[depth:depth + len(remaining)] == remaining:
+                raise ToolError('Path is not accessible')
+            # Windows 自动分配的短名不可预测；未解析短名规则保守阻止同父的叶子发布。
+            if (write and len(remaining) == 1 and len(names) == depth + 1
+                    and _unresolved_short_alias(remaining[0])):
+                raise ToolError('Path is not accessible')
+
+
+def _path_policy(context, path, write=False, roots=None):
+    """先判路径、后做 I/O；拒绝项只收紧可信根，不能扩根。"""
+    path = _absolute(path)
+    if context is None:  # 仅配置管理器等受信内部入口和纯原语测试使用。
+        if write:
+            raise ToolError('File writes require a configuration snapshot')
+        return path
+    from . import host
+
+    trusted = []
+    if roots is not None:
+        # 仅由 package_root() 从宿主插件 API 解析；不是 MCP 参数。
+        trusted.extend(_absolute(value) for value in roots)
+    else:
+        for value in (getattr(context, 'root', None), getattr(context, 'data_root', None)):
+            if value:
+                trusted.append(_absolute(value))
+    if not trusted or not any(_within(path, root) for root in trusted):
+        raise ToolError('Path is outside the trusted OlivOS roots')
+    # 字符串拒绝保留为 I/O 前的快速路径；实际对象身份另行复核。
+    if any(_within(_denial_key(path), _denial_key(item)) for item in _blocked_paths(context)):
+        raise ToolError('Path is not accessible')
     if write and not host.allowed(context, 'real_account_write'):
         raise ToolError('Writing plugin configuration is not permitted')
     return path
@@ -125,21 +364,29 @@ def _kind(info, context=None):
     raise ToolError('Unsupported file type')
 
 
-def _walk(path, directory=False):
-    """仅在路径策略通过后调用；从 / 逐组件打开，任何祖先均不可是链接。"""
-    names = [part for part in path.split('/') if part not in ('', '.')]
+def _walk(path, directory=False, identities=None):
+    """从原生绝对根逐组件打开，并收集真实祖先身份以拦截大小写/短名别名。"""
+    anchor, names = _path_parts(path)
     fd = None
     try:
-        fd = os.open('/', _DIR_FLAGS | os.O_NOFOLLOW)
+        fd = (_winfs.open_root(anchor) if _WINDOWS
+              else os.open(anchor, _DIR_FLAGS | os.O_NOFOLLOW))
+        if identities is not None:
+            info = fstat(fd)
+            identities.append((info.st_dev, info.st_ino))
         for index, name in enumerate(names):
-            flags = _DIR_FLAGS | os.O_NOFOLLOW if directory or index < len(names) - 1 else _FILE_FLAGS
-            nxt = os.open(name, flags, dir_fd=fd)
-            os.close(fd)
+            is_dir = directory or index < len(names) - 1
+            nxt = open_file(name, _DIR_FLAGS if is_dir else _FILE_FLAGS,
+                            dir_fd=fd, directory=True if is_dir else None)
+            close(fd)
             fd = nxt
+            if identities is not None:
+                info = fstat(fd)
+                identities.append((info.st_dev, info.st_ino))
         return fd
     except BaseException:
         if fd is not None:
-            os.close(fd)
+            close(fd)
         raise
 
 
@@ -151,21 +398,23 @@ def authorize_path(context, absolute_path, write=False):
     path = _path_policy(context, absolute_path, write)
     fd = None
     try:
-        fd = _walk(path)
-        _kind(os.fstat(fd), context)
+        identities = []
+        fd = _walk(path, identities=identities)
+        _kind(fstat(fd), context)
+        _identity_policy(context, identities, path, write=write)
         return path
     except OSError:
         raise ToolError('Path is unavailable') from None
     finally:
         if fd is not None:
-            os.close(fd)
+            close(fd)
 
 
-def _check_fd(fd):
-    """读/枚举前后复核当前策略与 fd 路径身份，拒绝祖先或叶子的替换。"""
+def _check_fd(fd, identities=None):
+    """读/枚举前后复核当前策略与已开对象及祖先身份，拒绝路径替换和别名。"""
     require()
     try:
-        info = os.fstat(fd)
+        info = fstat(fd)
         context = getattr(fd, 'context', None)
         _kind(info, context)
         if not isinstance(fd, _FD):
@@ -174,21 +423,23 @@ def _check_fd(fd):
         path = _path_policy(context, fd.path, roots=roots)
         if fd.identity != (info.st_dev, info.st_ino):
             raise ToolError('Path identity changed')
-        check = _walk(path)
+        identities = [] if identities is None else identities
+        check = _walk(path, identities=identities)
         try:
-            current = os.fstat(check)
+            current = fstat(check)
             _kind(current, context)
             if (current.st_dev, current.st_ino) != fd.identity:
                 raise ToolError('Path identity changed')
+            _identity_policy(context, identities, path)
         finally:
-            os.close(check)
+            close(check)
         return info
     except OSError:
         raise ToolError('Path is unavailable') from None
 
 
 def open_root(root, context=None):
-    """逐组件 O_NOFOLLOW 打开可信根；context 随派生 fd 传递。"""
+    """按原生路径逐组件安全打开可信根；context 随派生句柄传递。"""
     return _open_root(root, context, None)
 
 
@@ -239,7 +490,7 @@ def _open_root(root, context, roots):
         raise ToolError('File root is unavailable') from None
     finally:
         if fd is not None:
-            os.close(fd)
+            close(fd)
 
 
 def _relative_names(rel):
@@ -250,7 +501,7 @@ def _relative_names(rel):
     parts = rel.split('/')
     if '..' in parts:
         raise ToolError('Parent components are not allowed')
-    return [part for part in parts if part not in ('', '.')]
+    return [_component(part) for part in parts if part not in ('', '.')]
 
 
 def authorize_rel(dir_fd, rel, write=False):
@@ -263,6 +514,19 @@ def authorize_rel(dir_fd, rel, write=False):
         path = _path_policy(context, os.path.join(dir_fd.path, *names), write=write,
                             roots=getattr(dir_fd, 'roots', None))
     _check_fd(dir_fd)
+    if path is not None:
+        target = None
+        identities = []
+        try:
+            target = _walk(path, identities=identities)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise ToolError('Path is unavailable') from None
+        finally:
+            if target is not None:
+                close(target)
+        _identity_policy(context, identities, path, write=write)
     return path
 
 
@@ -278,16 +542,16 @@ def open_rel(dir_fd, rel):
     _check_fd(dir_fd)
     fd = None
     try:
-        fd = os.dup(dir_fd)
+        fd = dup(dir_fd)
         for name in names[:-1]:
-            nxt = os.open(name, _DIR_FLAGS | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
+            nxt = open_file(name, _DIR_FLAGS, dir_fd=fd, directory=True)
+            close(fd)
             fd = nxt
         if names:
-            nxt = os.open(names[-1], _FILE_FLAGS, dir_fd=fd)
-            os.close(fd)
+            nxt = open_file(names[-1], _FILE_FLAGS, dir_fd=fd)
+            close(fd)
             fd = nxt
-        info = os.fstat(fd)
+        info = fstat(fd)
         kind = _kind(info, context)
         result = _FD(fd, context, path, roots) if path is not None else fd
         _check_fd(result)
@@ -298,29 +562,34 @@ def open_rel(dir_fd, rel):
         raise ToolError('Path is unavailable') from None
     finally:
         if fd is not None:
-            os.close(fd)
+            close(fd)
 
 
 def _list(dir_fd, limit, audit):
     """最多读 limit+1 条目录项；audit 模式额外报告被策略隐藏的条目数。"""
-    _check_fd(dir_fd)
+    identities = []
+    _check_fd(dir_fd, identities)
     entries = []
     seen = 0
     blocked = 0
     truncated = False
     context = getattr(dir_fd, 'context', None)
     roots = getattr(dir_fd, 'roots', None)
+    forbidden = _blocked_targets(context)
     try:
-        with os.scandir(dir_fd) as iterator:
+        with scandir(dir_fd) as iterator:
             for entry in iterator:
                 seen += 1  # 不可 stat 的条目也计入上限，避免无界迭代
                 if seen > limit:
                     truncated = True
                     break
                 try:
+                    _component(entry.name)
+                    path = None
                     if isinstance(dir_fd, _FD):
-                        _path_policy(context, os.path.join(dir_fd.path, entry.name), roots=roots)
+                        path = _path_policy(context, os.path.join(dir_fd.path, entry.name), roots=roots)
                     info = entry.stat(follow_symlinks=False)
+                    _identity_policy(context, identities + [(info.st_dev, info.st_ino)], path, forbidden)
                     if context is not None and stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
                         if audit:
                             blocked += 1
@@ -368,13 +637,13 @@ def read_fd(fd, limit=MAX_FILE):
     total = 0
     try:
         while total < limit:
-            chunk = os.read(fd, min(65536, limit - total))
+            chunk = read(fd, min(65536, limit - total))
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
         data = b''.join(chunks)
-        truncated = os.read(fd, 1) != b''
+        truncated = read(fd, 1) != b''
     except OSError:
         raise ToolError('File is unavailable') from None
     _check_fd(fd)
@@ -395,22 +664,22 @@ def read_range(dir_fd, rel, offset, limit=MAX_FILE):
     try:
         if kind != 'file':
             raise ToolError('Not a regular file')
-        if not hasattr(os, 'pread'):
+        if not _WINDOWS and not hasattr(os, 'pread'):
             raise ToolError('Positioned file reads are not supported')
         try:
-            before = os.fstat(fd)
+            before = fstat(fd)
             if offset > before.st_size:
                 raise ToolError('File range is out of bounds')
             revision = _revision(before)
             chunks = []
             total = 0
             while total < limit:
-                chunk = os.pread(fd, min(65536, limit - total), offset + total)
+                chunk = pread(fd, min(65536, limit - total), offset + total)
                 if not chunk:
                     break
                 chunks.append(chunk)
                 total += len(chunk)
-            after = os.fstat(fd)
+            after = fstat(fd)
         except OSError:
             raise ToolError('File is unavailable') from None
         data = b''.join(chunks)
@@ -421,7 +690,7 @@ def read_range(dir_fd, rel, offset, limit=MAX_FILE):
             raise ToolError('File changed during read')
         return data, before.st_size, revision, offset + total < before.st_size
     finally:
-        os.close(fd)
+        close(fd)
 
 
 def read_at(dir_fd, rel, limit=MAX_FILE):
@@ -431,13 +700,13 @@ def read_at(dir_fd, rel, limit=MAX_FILE):
         if kind != 'file':
             raise ToolError('Not a regular file')
         try:
-            size = os.fstat(fd).st_size
+            size = fstat(fd).st_size
         except OSError:
             raise ToolError('File is unavailable')
         data, _, truncated = read_fd(fd, limit)
         return data, size, truncated
     finally:
-        os.close(fd)
+        close(fd)
 
 
 def read_tail(dir_fd, rel, limit=MAX_FILE):
@@ -447,15 +716,15 @@ def read_tail(dir_fd, rel, limit=MAX_FILE):
         if kind != 'file':
             raise ToolError('Not a regular file')
         try:
-            size = os.fstat(fd).st_size
+            size = fstat(fd).st_size
         except OSError:
             raise ToolError('File is unavailable')
         offset = max(0, size - limit)
-        os.lseek(fd, offset, os.SEEK_SET)
+        lseek(fd, offset, os.SEEK_SET)
         data, _, more = read_fd(fd, limit)
         return data, size, offset > 0 or more
     finally:
-        os.close(fd)
+        close(fd)
 
 
 def read_package(dir_fd, rel):
@@ -465,7 +734,7 @@ def read_package(dir_fd, rel):
         if kind != 'file':
             raise ToolError('Not a regular file')
         try:
-            size = os.fstat(fd).st_size
+            size = fstat(fd).st_size
         except OSError:
             raise ToolError('Package is unavailable')
         if size > MAX_OPK:
@@ -475,7 +744,7 @@ def read_package(dir_fd, rel):
             raise ToolError('Package too large')
         return data
     finally:
-        os.close(fd)
+        close(fd)
 
 
 def _central_count(data, start, size):

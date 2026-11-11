@@ -618,7 +618,8 @@ class ConfigServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_managed_publish_refused_after_manager_stop(self):
         with tempfile.TemporaryDirectory() as directory:
-            data_root = os.path.join(directory, 'data')
+            root = os.path.realpath(directory)
+            data_root = os.path.join(root, 'data')
             os.makedirs(data_root)
             manager = config.ConfigManager(data_root, 'full')
             manager.refresh()  # 首次轮询生成两份模板
@@ -639,7 +640,7 @@ class ConfigServiceTests(unittest.IsolatedAsyncioTestCase):
                 svc.app = object()
                 return object()
 
-            context = Context(self.proc, directory, data_root)
+            context = Context(self.proc, root, data_root)
             results = []
 
             def apply():
@@ -664,7 +665,8 @@ class ConfigServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_stop_blocks_late_config_publish(self):
         with tempfile.TemporaryDirectory() as directory:
-            data_root = os.path.join(directory, 'data')
+            root = os.path.realpath(directory)
+            data_root = os.path.join(root, 'data')
             os.makedirs(data_root)
             manager = config.ConfigManager(data_root, 'full')
             manager.refresh()
@@ -738,7 +740,8 @@ class PluginInstallPermissionTests(unittest.TestCase):
     def test_template_and_old_config_omission(self):
         self.assertIs(config.config_template()['full_plugin_install'], False)
         with tempfile.TemporaryDirectory() as directory:
-            data_root = os.path.join(directory, 'data')
+            root = os.path.realpath(directory)
+            data_root = os.path.join(root, 'data')
             os.makedirs(data_root)
             manager = config.ConfigManager(data_root, 'full')
             try:
@@ -776,7 +779,7 @@ class PortPersistenceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='cockpit-port-')
         self.addCleanup(self.temp.cleanup)
-        self.data_root = os.path.join(self.temp.name, 'data')
+        self.data_root = os.path.join(os.path.realpath(self.temp.name), 'data')
         os.makedirs(self.data_root)
         self.manager = config.ConfigManager(self.data_root, 'full')
         self.addCleanup(self.manager.stop)

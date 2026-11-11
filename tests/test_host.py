@@ -546,7 +546,7 @@ class PluginConfigSetTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = self.tmp.name
+        self.root = os.path.realpath(self.tmp.name)
         Path(self.root, 'plugin', 'conf').mkdir(parents=True)
         Path(self.root, 'plugin', 'conf', 'UserConfAll.db').write_bytes(b'')
         Path(self.root, 'plugin', 'data').mkdir()
@@ -619,7 +619,10 @@ class PluginConfigSetTests(unittest.TestCase):
         outside.write_bytes(b'')
         db = Path(self.root, 'plugin', 'conf', 'UserConfAll.db')
         db.unlink()
-        db.symlink_to(outside)
+        try:
+            db.symlink_to(outside)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('file symlinks are unavailable: ' + str(exc))
         out = self.spec.handler(ctx, {'namespace': 'Example', 'key': 'k', 'value': 1})
         self.assertTrue(out.is_error)
         self.assertEqual(proc.database.calls, [])

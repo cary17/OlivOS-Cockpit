@@ -185,7 +185,10 @@ class SymlinkTests(SafeError):
         self.real = os.path.join(self.base, 'real')
         os.makedirs(os.path.join(self.real, 'logfile'))
         self.link = os.path.join(self.base, 'link')
-        os.symlink(self.real, self.link)
+        try:
+            os.symlink(self.real, self.link)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('symlink creation is unavailable: ' + str(exc))
 
     def test_symlink_root_rejected(self):
         self.assertSafe(fs.open_root, self.link)
@@ -205,7 +208,7 @@ class SymlinkTests(SafeError):
         try:
             self.assertSafe(fs.read_at, fd, 'data/x')
         finally:
-            os.close(fd)
+            fs.close(fd)
 
     def test_symlink_in_data_is_listed_not_followed(self):
         root = base_dir()
@@ -302,14 +305,22 @@ class SpecialFileTests(SafeError):
         os.makedirs(self.ns)
         os.makedirs(self.logdir)
 
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO is unavailable on this platform')
     def test_fifo_rejected(self):
-        os.mkfifo(os.path.join(self.ns, 'pipe'))
+        try:
+            os.mkfifo(os.path.join(self.ns, 'pipe'))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('FIFO creation is unavailable: ' + str(exc))
         self.assertSafe(files.cockpit_data, make_ctx(self.root),
                         {'namespace': 'Demo', 'mode': 'read', 'path': 'pipe'})
         self.assertSafe(files.cockpit_log, make_ctx(self.root), {'filename': 'pipe'})
 
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'FIFO is unavailable on this platform')
     def test_fifo_in_logdir_explicit_filename(self):
-        os.mkfifo(os.path.join(self.logdir, 'x.log'))
+        try:
+            os.mkfifo(os.path.join(self.logdir, 'x.log'))
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest('FIFO creation is unavailable: ' + str(exc))
         self.assertSafe(files.cockpit_log, make_ctx(self.root), {'filename': 'x.log'})
 
     def test_no_log_file(self):
@@ -920,7 +931,7 @@ class OpkTests(SafeError):
         try:
             self.assertSafe(fs.package_manifest, fs.read_package(fd, name))
         finally:
-            os.close(fd)
+            fs.close(fd)
 
     def test_manifest_too_large_by_header(self):
         def build(path):
@@ -956,7 +967,7 @@ class OpkTests(SafeError):
                 return  # 声明小于实际时读取被声明值截断，解析失败即安全
             self.assertLessEqual(len(result), 5)
         finally:
-            os.close(fd)
+            fs.close(fd)
 
     def test_encrypted_rejected(self):
         def build(path):
@@ -1102,7 +1113,7 @@ class DescriptorTests(SafeError):
 
     def test_open_rel_closes_fd_when_result_check_raises_base_exception(self):
         parent = fs.open_root(self.root)
-        self.addCleanup(os.close, parent)
+        self.addCleanup(fs.close, parent)
         before = fd_count()
         real_check = fs._check_fd
         calls = []
@@ -1204,6 +1215,7 @@ class PrimitiveTests(unittest.TestCase):
         finally:
             fs.supported = original
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX os.open dir_fd race injection')
     def test_leaf_swapped_to_symlink_is_rejected(self):
         root = base_dir()
         os.makedirs(os.path.join(root, 'data'))
@@ -1231,7 +1243,7 @@ class PrimitiveTests(unittest.TestCase):
         finally:
             os.supports_dir_fd.discard(racing_open)
             os.open = real_open
-            os.close(fd)
+            fs.close(fd)
         self.assertTrue(swapped)
 
     def test_open_root_rejects_relative_and_dotdot(self):
