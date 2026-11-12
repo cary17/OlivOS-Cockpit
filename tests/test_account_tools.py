@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -166,18 +167,26 @@ class AccountToolsTests(unittest.TestCase):
 
         return patch.object(fs, 'fsync', fsync)
 
+    @contextmanager
     def after_replace(self, action):
-        """在目录 fsync 尝试前注入，避免平台不支持目录同步时跳过操作。"""
-        real = fs.fsync
-        calls = []
+        """在真实核验前注入，避免注入错误被目录同步的 OSError 降级吞掉。"""
+        real = file_write._verify_committed
+        completed = []
 
-        def fsync(fd):
-            calls.append(fd)
-            if len(calls) == 2:
-                action()
-            return real(fd)
+        def verify(parent, name, staged, content):
+            self.assertTrue(os.path.samestat(
+                fs.stat_at(name, dir_fd=parent), fs.fstat(staged)))
+            self.assertEqual(fs.read_at(parent, name, len(content) + 1)[0], content)
+            action(parent, name, staged, content)
+            completed.append(True)
+            return real(parent, name, staged, content)
 
-        return patch.object(fs, 'fsync', fsync)
+        with patch.object(file_write, '_verify_committed', side_effect=verify) as hook:
+            try:
+                yield
+            finally:
+                hook.assert_called_once()
+                self.assertEqual(completed, [True])
 
     def test_native_default_full_file_revision_disabled_and_raw_credentials(self):
         defaults = copy.deepcopy(self.sdk.default)
@@ -705,25 +714,52 @@ class AccountToolsTests(unittest.TestCase):
         self.assertTrue(result.data['requires_host_restart'])
 
     def test_post_replace_verification_failure_is_not_wrapped_as_success(self):
-        changed = b'{"external":true}\n'
+        changed = []
 
-        def swap():
+        def swap(parent, name, staged, content):
+            # 正文相同，仅替换身份；原生 unlink 支持仍持有发布句柄的文件。
             outside = self.root / 'outside.json'
-            outside.write_bytes(changed)
-            os.replace(outside, self.target)
+            outside.write_bytes(content)
+            source = fs.open_root(str(self.root))
+            try:
+                external = fs.stat_at(outside.name, dir_fd=source)
+                self.assertFalse(os.path.samestat(external, fs.fstat(staged)))
+                fs.unlink(name, dir_fd=parent)
+                fs.replace(outside.name, name, src_dir_fd=source, dst_dir_fd=parent)
+                current = fs.stat_at(name, dir_fd=parent)
+                self.assertTrue(os.path.samestat(current, external))
+                self.assertFalse(os.path.samestat(current, fs.fstat(staged)))
+            finally:
+                fs.close(source)
+            self.assertFalse(outside.exists())
+            changed.append(content)
 
-        def rewrite():
-            self.target.write_bytes(changed)
+        def rewrite(parent, name, staged, content):
+            # 等长改写无需截断，确保只靠正文核验发现变化。
+            external = b'{"external":true}\n'.ljust(len(content), b' ')
+            self.assertEqual(len(external), len(content))
+            self.assertNotEqual(external, content)
+            writer = fs.open_file(name, os.O_WRONLY, dir_fd=parent, directory=False)
+            try:
+                self.assertTrue(os.path.samestat(fs.fstat(writer), fs.fstat(staged)))
+                self.assertEqual(fs.write(writer, external), len(external))
+                self.assertTrue(os.path.samestat(
+                    fs.stat_at(name, dir_fd=parent), fs.fstat(staged)))
+            finally:
+                fs.close(writer)
+            changed.append(external)
 
         for label, action in (('leaf_replace', swap), ('same_inode_rewrite', rewrite)):
             with self.subTest(action=label):
+                changed.clear()
                 self.target.write_bytes(self.original)
                 self.target.chmod(0o640)
                 with self.after_replace(action), self.assertRaises(contracts.ToolError) as caught:
                     self.update()
                 self.assertIn('may have completed', str(caught.exception))
+                self.assertEqual(len(changed), 1)
                 # 不回滚、不删除外部对象：外部内容保留，暂存路径无残留。
-                self.assertEqual(self.target.read_bytes(), changed)
+                self.assertEqual(self.target.read_bytes(), changed[0])
                 self.assertEqual(list(self.conf.glob('.cockpit-*.tmp')), [])
 
     def test_same_path_boot_revision_change_during_validation_or_staging_prevents_commit(self):
