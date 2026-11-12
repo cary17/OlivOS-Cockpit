@@ -4,6 +4,7 @@ import asyncio
 import concurrent.futures
 import errno
 import json
+import ntpath
 import os
 import sys
 import tempfile
@@ -27,6 +28,41 @@ from OlivOSCockpit.contracts import (  # noqa: E402
 CONTEXT = Context(None, '/unused', '/unused/data')
 KEY = 'OlivOS-' + 'A' * 16 + 'b' * 8 + '1' * 8
 NEW_KEY = 'OlivOS-' + 'B' * 16 + 'c' * 8 + '2' * 8
+
+
+class ControlPathTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(config, 'os', SimpleNamespace(path=ntpath, sep=ntpath.sep)))
+        self.enterContext(patch.object(config.fs, 'os', SimpleNamespace(path=ntpath, sep=ntpath.sep)))
+        self.enterContext(patch.object(config.fs, '_WINDOWS', True))
+
+    def test_windows_control_roots_require_qualified_absolute_paths(self):
+        for root in (None, '', '.', 'C:', r'C:plugin\data', r'\plugin\data', '/plugin/data',
+                     r'C:\plugin\..\data', 'C:/plugin/../data', r'C:\plugin/../data',
+                     r'\\server\share\plugin/../data', 'C:/plugin/\x00data'):
+            with self.subTest(root=root):
+                self.assertIsNone(config.control_dir(root))
+                self.assertTrue(config.is_protected(root, 'Other/config.json'))
+
+    def test_windows_drive_and_unc_roots_keep_native_path_semantics(self):
+        for root in (r'C:\插件 数据', 'C:/插件 数据', r'\\server\share\插件 数据'):
+            with self.subTest(root=root):
+                control = ntpath.join(ntpath.normpath(root), config.NAMESPACE_DIR, config.CONTROL_DIR)
+                self.assertEqual(config.control_dir(root), control)
+                self.assertTrue(config.is_protected(root, control + r'\config.json'))
+                self.assertTrue(config.is_protected(root, control.swapcase() + r'\config.json'))
+                self.assertFalse(config.is_protected(root, 'Other/config.json'))
+                self.assertFalse(config.is_protected(root, ntpath.join(root, 'Other', 'config.json')))
+                self.assertFalse(config.is_protected(root, 'OlivOSCockpit/control-other/config.json'))
+
+    def test_windows_protected_paths_reject_raw_parent_components(self):
+        root = r'C:\plugin\data'
+        for path in (None, '', 'Other/../Other/config.json', r'Other\..\Other\config.json',
+                     r'Other/..\Other\config.json', 'C:/plugin/data/Other/../Other/config.json',
+                     r'C:\plugin\data\Other/../Other\config.json',
+                     '/unqualified/config.json', r'\unqualified\config.json', 'Other/\x00config.json'):
+            with self.subTest(path=path):
+                self.assertTrue(config.is_protected(root, path))
 
 
 class SiteStub:
@@ -865,11 +901,15 @@ class PortPersistenceTests(unittest.TestCase):
     def test_replace_failure_reports_false_and_cleans_temp(self):
         data, snapshot = self.ready(listen_port=8710)
         before = self.path.read_bytes()
+        identity = self.path.stat()
         future = self.manager.request_listen_port(8711, snapshot.fingerprint)
-        with patch.object(config.os, 'replace', side_effect=OSError(errno.EACCES, 'denied')):
+        with patch.object(config.fs, 'replace', side_effect=OSError(errno.EACCES, 'denied')) as replace_file:
             self.cycle()
+        replace_file.assert_called_once()
+        self.assertTrue(future.done())
         self.assertFalse(future.result(0))
         self.assertEqual(self.path.read_bytes(), before)
+        self.assertTrue(os.path.samestat(self.path.stat(), identity))
         self.assertEqual([item.name for item in self.control.iterdir()
                           if item.name.endswith('.tmp')], [])
 

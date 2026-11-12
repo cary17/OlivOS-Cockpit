@@ -892,7 +892,7 @@ class DataPaginationTests(unittest.IsolatedAsyncioTestCase):
     async def test_file_larger_than_read_budget_is_complete_over_http(self):
         original = ('row ' + '界' * 10000 + '\n') * 36
         path = self.namespace / 'large.txt'
-        path.write_text(original, encoding='utf-8')
+        path.write_text(original, encoding='utf-8', newline='')
         self.assertGreater(path.stat().st_size, 1024 * 1024)
         await self.start()
         text, count = await self.collect(path.name)

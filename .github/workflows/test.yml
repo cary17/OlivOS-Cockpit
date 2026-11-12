@@ -78,7 +78,7 @@ jobs:
           architecture: ${{ matrix.architecture }}
       - name: Verify runner and Python architecture
         run: >-
-          python -c "import os,platform,struct,sys,sysconfig; machine=platform.machine().lower(); tag=sysconfig.get_platform().lower(); bits=struct.calcsize('P')*8; expected=set(os.environ['EXPECTED_MACHINES'].split(',')); print('python=%s system=%s machine=%s pointer_bits=%s platform=%s' % (sys.version.split()[0], platform.system(), machine, bits, tag)); assert sys.version_info[:2]==(3,11); assert platform.system()==os.environ['EXPECTED_SYSTEM']; assert machine in expected; assert bits==int(os.environ['EXPECTED_POINTER_BITS']); assert os.environ['EXPECTED_PLATFORM_TAG'] in tag"
+          python -c "import os,platform,struct,sys,sysconfig; machine=platform.machine().lower(); tag=sysconfig.get_platform().lower(); bits=struct.calcsize('P')*8; expected=set(os.environ['EXPECTED_MACHINES'].split(',')); print('python=%s system=%s machine=%s pointer_bits=%s platform=%s' % (sys.version.split()[0], platform.system(), machine, bits, tag)); assert sys.version_info[:2]==(3,11); assert platform.system()==os.environ['EXPECTED_SYSTEM']; assert machine in expected; assert bits==int(os.environ['EXPECTED_POINTER_BITS']); assert os.environ['EXPECTED_PLATFORM_TAG'] in tag or (platform.system()=='Darwin' and tag.endswith('-universal2'))"
       - name: Install host runtime dependency
         run: python -m pip install aiohttp
       - name: Run complete unit suite

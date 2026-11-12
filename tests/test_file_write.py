@@ -73,7 +73,7 @@ class FileWriteTests(unittest.TestCase):
         if os.name == 'posix':
             self.assertEqual(self.target.stat().st_mode & 0o777, 0o640)
         self.assertTrue(outcome.data['persisted'])
-        self.assertEqual(outcome.data['durability'], 'synced')
+        self.assertEqual(outcome.data['durability'], 'unknown' if os.name == 'nt' else 'synced')
         self.assertEqual(outcome.data['namespace'], 'Demo')
         self.assertFalse(outcome.data['reloaded'])
         self.assertIsNone(outcome.after_send)
@@ -266,22 +266,40 @@ class FileWriteTests(unittest.TestCase):
         outside.mkdir()
         (outside / self.target.name).write_bytes(b'private')
         moved = self.parent.with_name('moved')
+        parent_identity, target_identity = self.parent.stat(), self.target.stat()
+        rename_errors = []
 
         def swap():
-            self.parent.rename(moved)
+            try:
+                self.parent.rename(moved)
+            except OSError as error:
+                rename_errors.append(error)
+                raise
             self.parent.symlink_to(outside, target_is_directory=True)
 
-        probe = self.root / 'symlink-probe'
-        try:
-            probe.symlink_to(outside, target_is_directory=True)
-        except (OSError, NotImplementedError) as exc:
-            self.skipTest('directory symlinks are unavailable: ' + str(exc))
-        probe.unlink()
+        if os.name != 'nt':
+            probe = self.root / 'symlink-probe'
+            try:
+                probe.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest('directory symlinks are unavailable: ' + str(exc))
+            probe.unlink()
         with self.during_sync(swap), self.assertRaises(contracts.ToolError):
             self.update()
+        if os.name == 'nt':
+            self.assertEqual([error.winerror for error in rename_errors], [32])
+            self.assertFalse(moved.exists())
+            self.assertFalse(self.parent.is_symlink())
+            retained = self.parent
+        else:
+            self.assertEqual(rename_errors, [])
+            self.assertTrue(self.parent.is_symlink())
+            retained = moved
+        self.assertTrue(os.path.samestat(retained.stat(), parent_identity))
+        self.assertTrue(os.path.samestat((retained / self.target.name).stat(), target_identity))
         self.assertEqual((outside / self.target.name).read_bytes(), b'private')
-        self.assertEqual((moved / self.target.name).read_bytes(), self.original)
-        self.assertEqual(list(moved.glob('.cockpit-*.tmp')), [])
+        self.assertEqual((retained / self.target.name).read_bytes(), self.original)
+        self.assertEqual(list(retained.glob('.cockpit-*.tmp')), [])
 
     def test_temporary_name_replacement_is_detected(self):
         outside = self.root / 'outside.json'
@@ -335,16 +353,15 @@ class FileWriteTests(unittest.TestCase):
         self.assertEqual(self.target.read_text(encoding='utf-8'), self.args()['content'])
 
     def after_replace(self, action):
-        """在目录 fsync（replace 已完成、核验未开始）时机注入外部操作。"""
+        """在目录 fsync 尝试前注入，避免平台不支持目录同步时跳过操作。"""
         real = fs.fsync
         calls = []
 
         def fsync(fd):
-            result = real(fd)
             calls.append(fd)
             if len(calls) == 2:
                 action()
-            return result
+            return real(fd)
 
         return patch.object(fs, 'fsync', fsync)
 
@@ -374,19 +391,42 @@ class FileWriteTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), changed)
         self.assertEqual(list(self.parent.glob('.cockpit-*.tmp')), [])
 
-    def test_post_replace_ancestor_move_is_not_reported_as_success(self):
+    def test_post_replace_ancestor_move_is_blocked_or_detected(self):
         moved = self.parent.with_name('moved')
+        parent_identity = self.parent.stat()
+        committed = []
+        rename_errors = []
 
         def move():
-            self.parent.rename(moved)
+            committed.append(self.target.stat())
+            self.assertEqual(self.target.read_bytes(), b'{"value":"new"}\n')
+            try:
+                self.parent.rename(moved)
+            except OSError as error:
+                if os.name != 'nt':
+                    raise
+                rename_errors.append(error)
 
-        with self.after_replace(move), self.assertRaises(contracts.ToolError) as caught:
-            self.update()
-        self.assertIn('may have completed', str(caught.exception))
-        # 不回滚：已提交内容仍在被移动后的目录中，且无临时文件残留。
-        self.assertEqual((moved / self.target.name).read_bytes(), b'{"value":"new"}\n')
-        self.assertFalse(self.parent.exists())
-        self.assertEqual(list(moved.glob('.cockpit-*.tmp')), [])
+        if os.name == 'nt':
+            with self.after_replace(move):
+                outcome = self.update()
+            self.assertTrue(outcome.data['persisted'])
+            self.assertEqual(outcome.data['durability'], 'unknown')
+            self.assertEqual([error.winerror for error in rename_errors], [32])
+            self.assertFalse(moved.exists())
+            self.assertFalse(self.parent.is_symlink())
+            retained = self.parent
+        else:
+            with self.after_replace(move), self.assertRaises(contracts.ToolError) as caught:
+                self.update()
+            self.assertIn('may have completed', str(caught.exception))
+            self.assertFalse(self.parent.exists())
+            retained = moved
+        self.assertEqual(len(committed), 1)
+        self.assertTrue(os.path.samestat(retained.stat(), parent_identity))
+        self.assertTrue(os.path.samestat((retained / self.target.name).stat(), committed[0]))
+        self.assertEqual((retained / self.target.name).read_bytes(), b'{"value":"new"}\n')
+        self.assertEqual(list(retained.glob('.cockpit-*.tmp')), [])
 
     def test_preexisting_temp_prefixed_files_are_never_scanned_or_removed(self):
         decoy = self.parent / '.cockpit-decoy.tmp'

@@ -167,16 +167,15 @@ class AccountToolsTests(unittest.TestCase):
         return patch.object(fs, 'fsync', fsync)
 
     def after_replace(self, action):
-        """在目录 fsync（replace 已完成、核验未开始）时机注入外部操作。"""
+        """在目录 fsync 尝试前注入，避免平台不支持目录同步时跳过操作。"""
         real = fs.fsync
         calls = []
 
         def fsync(fd):
-            result = real(fd)
             calls.append(fd)
             if len(calls) == 2:
                 action()
-            return result
+            return real(fd)
 
         return patch.object(fs, 'fsync', fsync)
 
@@ -333,7 +332,7 @@ class AccountToolsTests(unittest.TestCase):
         own = self.data / 'OlivOSCockpit/control/config.json'
         self.write_json(own, self.document)
         for path in (str(own), str(self.data / 'olivoscockpit/secret.json'), str(external),
-                     '../account.json', './conf/../conf/account.json', 'C:/conf/account.json', 'conf\\account.json'):
+                     '../account.json', './conf/../conf/account.json', 'C:/conf/account.json'):
             self.write_json(self.conf / 'basic.json', self.boot(path))
             self.rejects(self.read)
         self.write_json(self.conf / 'basic.json', self.boot())
@@ -342,6 +341,22 @@ class AccountToolsTests(unittest.TestCase):
         self.rejects(self.read)
         self.assertEqual(external.read_bytes(), self.original)
         self.unchanged()
+
+    def test_boot_backslash_path_follows_host_platform_semantics(self):
+        self.write_json(self.conf / 'basic.json', self.boot(r'conf\account.json'))
+        if os.name == 'nt':
+            result = self.read()
+            self.assertEqual(result.data['total'], 2)
+            self.assertEqual(result.data['sha256'], hashlib.sha256(self.original).hexdigest())
+            self.assertTrue(self.update().data['persisted'])
+            expected = copy.deepcopy(self.document)
+            expected['account'][0]['debug'] = True
+            self.assertEqual(json.loads(self.target.read_bytes()), expected)
+            self.assertEqual(list(self.conf.glob('.cockpit-*.tmp')), [])
+        else:
+            self.rejects(self.read)
+            self.rejects(self.update)
+            self.unchanged()
 
     def test_absolute_path_in_distinct_trusted_data_root_is_allowed(self):
         directory = tempfile.TemporaryDirectory(prefix='cockpit-account-data-')
@@ -503,7 +518,7 @@ class AccountToolsTests(unittest.TestCase):
         self.assertEqual(result.data['runtime_active_config'], 'unknown')
         self.assertEqual(result.data['path_source'], 'disk_boot_configuration')
         self.assertEqual(result.data['sha256'], hashlib.sha256(self.target.read_bytes()).hexdigest())
-        self.assertEqual(result.data['durability'], 'synced')
+        self.assertEqual(result.data['durability'], 'unknown' if os.name == 'nt' else 'synced')
         self.assertIsNone(result.after_send)
         self.assertNotIn('future_account', self.sdk.validated[-1])
         self.assertNotIn('future_server', self.sdk.validated[-1]['server'])
@@ -637,21 +652,39 @@ class AccountToolsTests(unittest.TestCase):
 
     def test_account_ancestor_symlink_swap_during_staging_prevents_commit(self):
         moved = self.root / 'old-conf'
-        probe = self.root / 'symlink-probe'
-        try:
-            probe.symlink_to(moved, target_is_directory=True)
-        except (OSError, NotImplementedError) as exc:
-            self.skipTest('directory symlinks are unavailable: ' + str(exc))
-        probe.unlink()
+        parent_identity, target_identity = self.conf.stat(), self.target.stat()
+        rename_errors = []
+        if os.name != 'nt':
+            probe = self.root / 'symlink-probe'
+            try:
+                probe.symlink_to(moved, target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest('directory symlinks are unavailable: ' + str(exc))
+            probe.unlink()
 
         def swap():
-            self.conf.rename(moved)
+            try:
+                self.conf.rename(moved)
+            except OSError as error:
+                rename_errors.append(error)
+                raise
             self.conf.symlink_to(moved, target_is_directory=True)
 
         with self.during_sync(swap):
             self.rejects(self.update)
-        self.assertEqual((moved / 'account.json').read_bytes(), self.original)
-        self.assertEqual(list(moved.glob('.cockpit-*.tmp')), [])
+        if os.name == 'nt':
+            self.assertEqual([error.winerror for error in rename_errors], [32])
+            self.assertFalse(moved.exists())
+            self.assertFalse(self.conf.is_symlink())
+            retained = self.conf
+        else:
+            self.assertEqual(rename_errors, [])
+            self.assertTrue(self.conf.is_symlink())
+            retained = moved
+        self.assertTrue(os.path.samestat(retained.stat(), parent_identity))
+        self.assertTrue(os.path.samestat((retained / 'account.json').stat(), target_identity))
+        self.assertEqual((retained / 'account.json').read_bytes(), self.original)
+        self.assertEqual(list(retained.glob('.cockpit-*.tmp')), [])
 
     def test_replace_failure_cleanup_and_directory_sync_reports_actual_persisted_state(self):
         with patch.object(fs, 'replace', side_effect=OSError('PRIVATE-SECRET')):

@@ -121,10 +121,11 @@ class Snapshot:
 
 
 def control_dir(data_root):
-    if (type(data_root) is not str or not os.path.isabs(data_root) or '\x00' in data_root
-            or '..' in data_root.split(os.sep)):
+    try:
+        data_root = fs._absolute(data_root)
+    except fs.ToolError:
         return None
-    return os.path.join(os.path.normpath(data_root), NAMESPACE_DIR, CONTROL_DIR)
+    return os.path.join(data_root, NAMESPACE_DIR, CONTROL_DIR)
 
 
 def is_protected(data_root, path):
@@ -135,14 +136,15 @@ def is_protected(data_root, path):
     control = control_dir(data_root)
     if control is None:
         return True
-    if type(path) is not str or not path or '\x00' in path or '..' in path.split(os.sep):
+    if (type(path) is not str or not path or '\x00' in path
+            or '..' in path.replace('\\', '/').split('/')):
         return True
     target = path if os.path.isabs(path) else os.path.join(data_root, path)
     try:
-        target = os.path.normcase(os.path.normpath(target))
-        control = os.path.normcase(os.path.normpath(control))
+        target = os.path.normcase(fs._absolute(target))
+        control = os.path.normcase(control)
         return os.path.commonpath((target, control)) == control
-    except (ValueError, OSError):
+    except (fs.ToolError, ValueError, OSError):
         return True
 
 

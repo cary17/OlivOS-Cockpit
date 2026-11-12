@@ -133,7 +133,7 @@ class PathPolicyTests(unittest.TestCase):
 
     def test_casefold_denial_never_widens_allowed_roots(self):
         # 大小写归一只能收紧拒绝集，不能授权根外路径（含大小写变体拼写）。
-        self.deny('/unrelated')
+        self.deny(str(self.root.with_name(self.root.name + '-unrelated')))
         directory = tempfile.TemporaryDirectory(prefix=self.root.name + '-sibling-')
         self.addCleanup(directory.cleanup)
         outside = Path(os.path.realpath(directory.name))
@@ -155,7 +155,8 @@ class PathPolicyTests(unittest.TestCase):
         (self.ns / 'hidden-safe').mkdir()
         target = self.ns / 'hidden-safe/ok.txt'
         target.write_text('ok', encoding='utf-8')
-        self.deny('plugin/data/Demo/hidden', '/unrelated')
+        self.deny('plugin/data/Demo/hidden',
+                  str(self.root.with_name(self.root.name + '-unrelated')))
         self.assertEqual(fs.authorize_path(self.ctx, str(target)), str(target))
         for path in ('/etc/passwd', str(self.root) + '-sibling/file', 'plugin/data/Demo/ok.txt',
                      str(self.root / '../outside')):
@@ -298,7 +299,21 @@ class PathPolicyTests(unittest.TestCase):
         (nested / 'ok.txt').write_bytes(b'ok')
         fd, _ = fs.open_rel(self.fd(self.ns), 'sub/ok.txt')
         self.addCleanup(fs.close, fd)
-        nested.rename(self.ns / 'moved')
+        moved = self.ns / 'moved'
+        if os.name == 'nt':
+            # Native ancestor handles prevent the redirect before it can occur.
+            with self.assertRaises(PermissionError) as caught:
+                nested.rename(moved)
+            self.assertEqual(caught.exception.winerror, 32)
+            self.assertTrue(nested.is_dir())
+            self.assertFalse(moved.exists())
+            self.assertEqual(fs.read_fd(fd), (b'ok', 2, False))
+            fs.close(fd)
+            nested.rename(moved)
+            self.assertFalse(nested.exists())
+            self.assertEqual((moved / 'ok.txt').read_bytes(), b'ok')
+            return
+        nested.rename(moved)
         try:
             nested.symlink_to(self.control, target_is_directory=True)
         except (OSError, NotImplementedError) as exc:

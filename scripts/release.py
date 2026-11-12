@@ -24,7 +24,7 @@ def api(endpoint, *options, body=None, missing_ok=False):
     if body is not None:
         command += ['--input', '-']
     result = subprocess.run(command, input=json.dumps(body) if body is not None else None,
-                            capture_output=True, text=True, check=False)
+                            capture_output=True, text=True, encoding='utf-8', check=False)
     if result.returncode:
         if missing_ok and '(HTTP 404)' in result.stderr:
             return None
@@ -33,7 +33,8 @@ def api(endpoint, *options, body=None, missing_ok=False):
 
 
 def git(*args):
-    return subprocess.check_output(['git', '-C', str(ROOT), *args], text=True).strip()
+    return subprocess.check_output(
+        ['git', '-C', str(ROOT), *args], text=True, encoding='utf-8').strip()
 
 
 def releases(repo):

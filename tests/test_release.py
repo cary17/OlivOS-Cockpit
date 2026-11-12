@@ -70,7 +70,8 @@ class ReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             def git(*args):
-                return subprocess.check_output(['git', '-C', str(root), *args], text=True).strip()
+                return subprocess.check_output(
+                    ['git', '-C', str(root), *args], text=True, encoding='utf-8').strip()
             git('init', '--quiet')
             git('config', 'user.name', 'Release Test')
             git('config', 'user.email', 'release@example.invalid')

@@ -90,7 +90,7 @@ class BuildTests(unittest.TestCase):
                     raw = archive.read(name)
                     self.assertFalse(raw.startswith(b'\xef\xbb\xbf'), name)
                     raw.decode('utf-8')
-                skill = archive.read('olivos-cockpit/SKILL.md').decode('utf-8')
+                skill = archive.read('olivos-cockpit/SKILL.md').decode('utf-8').replace('\r\n', '\n')
                 self.assertIn(f'metadata:\n  version: {RELEASE}', skill)
                 self.assertIn('OlivOSCockpit.opk', skill)
                 self.assertIn('OlivOSCockpitLite.opk', skill)
@@ -140,6 +140,7 @@ class BuildTests(unittest.TestCase):
 
     def test_clean_opk_import_and_first_call_after_unpacked_directory_removed(self):
         script = '''
+import contextlib
 import importlib
 import json
 import os
@@ -152,12 +153,13 @@ import zipfile
 
 archive_path, mode = sys.argv[1], sys.argv[2]
 FULL_ONLY = {'cockpit_send', 'cockpit_reload', 'cockpit_proc_get'}
-with tempfile.TemporaryDirectory() as directory:
+with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as cleanup:
     base = Path(os.path.realpath(directory))
     package = base / 'OlivOSCockpit'
     package.mkdir()
     with zipfile.ZipFile(archive_path) as archive:
         archive.extractall(package)
+    cleanup.callback(os.chdir, os.getcwd())
     os.chdir(base)
     # 注入宿主 stub：OlivOS 模块本身只提供插件回调所需的属性。
     olivos = types.ModuleType('OlivOS')
