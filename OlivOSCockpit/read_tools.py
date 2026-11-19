@@ -5,6 +5,7 @@ from itertools import islice
 
 from . import host
 from .contracts import (
+    MAX_ACCOUNT_ID_BITS,
     MAX_DEPTH,
     MAX_ENTRIES,
     NAMESPACE,
@@ -149,7 +150,7 @@ def _identity(bot):
     if any(type(item) is not str or not item or len(item) > MAX_ID for item in (digest,) + triple):
         return None
     if not ((type(bot_id) is str and 0 < len(bot_id) <= MAX_ID)
-            or (type(bot_id) is int and bot_id.bit_length() <= MAX_INTEGER_BITS)):
+            or (type(bot_id) is int and bot_id.bit_length() <= MAX_ACCOUNT_ID_BITS)):
         return None
     return digest, bot_id, triple
 

@@ -79476,7 +79476,7 @@
     "cockpit_account_connection_status": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79491,7 +79491,7 @@
     "cockpit_account_login_info": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79506,7 +79506,7 @@
     "cockpit_account_type_catalog": {
       "handler": "OlivOSCockpit.read_tools._metadata_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 293,
+      "handler_line": 294,
       "required_permission": null,
       "read_only": true,
       "profiles": [
@@ -79521,7 +79521,7 @@
     "cockpit_accounts_config": {
       "handler": "OlivOSCockpit.account_tools.cockpit_accounts_config",
       "handler_file": "OlivOSCockpit/account_tools.py",
-      "handler_line": 186,
+      "handler_line": 187,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79536,7 +79536,7 @@
     "cockpit_accounts_schema": {
       "handler": "OlivOSCockpit.read_tools._metadata_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 293,
+      "handler_line": 294,
       "required_permission": null,
       "read_only": true,
       "profiles": [
@@ -79565,7 +79565,7 @@
     "cockpit_accounts_validate": {
       "handler": "OlivOSCockpit.read_tools._metadata_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 293,
+      "handler_line": 294,
       "required_permission": null,
       "read_only": true,
       "profiles": [
@@ -79580,7 +79580,7 @@
     "cockpit_bots": {
       "handler": "OlivOSCockpit.host._bots",
       "handler_file": "OlivOSCockpit/host.py",
-      "handler_line": 317,
+      "handler_line": 318,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79753,7 +79753,7 @@
     "cockpit_friend_doubt_requests": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79768,7 +79768,7 @@
     "cockpit_friend_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79783,7 +79783,7 @@
     "cockpit_group_essence_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79798,7 +79798,7 @@
     "cockpit_group_file_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79813,7 +79813,7 @@
     "cockpit_group_file_stats": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79828,7 +79828,7 @@
     "cockpit_group_folder_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79843,7 +79843,7 @@
     "cockpit_group_ignored_requests": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79858,7 +79858,7 @@
     "cockpit_group_info": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79873,7 +79873,7 @@
     "cockpit_group_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79888,7 +79888,7 @@
     "cockpit_group_member_info": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79903,7 +79903,7 @@
     "cockpit_group_member_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79918,7 +79918,7 @@
     "cockpit_group_notice_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79933,7 +79933,7 @@
     "cockpit_group_system_msg": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79948,7 +79948,7 @@
     "cockpit_host_info": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -79963,7 +79963,7 @@
     "cockpit_host_list": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -80036,7 +80036,7 @@
     "cockpit_message_forward_get": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -80051,7 +80051,7 @@
     "cockpit_message_get": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -80110,7 +80110,7 @@
     "cockpit_plugin_config_set": {
       "handler": "OlivOSCockpit.full_only._plugin_config_set",
       "handler_file": "OlivOSCockpit/full_only.py",
-      "handler_line": 238,
+      "handler_line": 321,
       "required_permission": "real_account_write",
       "read_only": false,
       "profiles": [
@@ -80156,7 +80156,7 @@
     "cockpit_plugin_loaded_list": {
       "handler": "OlivOSCockpit.read_tools._metadata_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 293,
+      "handler_line": 294,
       "required_permission": null,
       "read_only": true,
       "profiles": [
@@ -80189,7 +80189,7 @@
     "cockpit_proc_get": {
       "handler": "OlivOSCockpit.full_only._proc_get",
       "handler_file": "OlivOSCockpit/full_only.py",
-      "handler_line": 193,
+      "handler_line": 276,
       "required_permission": "low_level_access",
       "read_only": true,
       "profiles": [
@@ -80204,7 +80204,7 @@
     "cockpit_protocol_version": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -80262,7 +80262,7 @@
     "cockpit_reload": {
       "handler": "OlivOSCockpit.full_only._reload",
       "handler_file": "OlivOSCockpit/full_only.py",
-      "handler_line": 148,
+      "handler_line": 231,
       "required_permission": "real_account_write",
       "read_only": false,
       "profiles": [
@@ -80277,7 +80277,7 @@
     "cockpit_send": {
       "handler": "OlivOSCockpit.full_only._send",
       "handler_file": "OlivOSCockpit/full_only.py",
-      "handler_line": 121,
+      "handler_line": 197,
       "required_permission": "real_account_write",
       "read_only": false,
       "profiles": [
@@ -80285,14 +80285,15 @@
       ],
       "tests": [
         "tests/test_host.py",
-        "tests/test_redaction.py"
+        "tests/test_redaction.py",
+        "tests/test_loader.py"
       ],
-      "verification": "repository_stub_tests; not_live_platform_verification"
+      "verification": "repository_stub_tests; isolated_real_loader_smoke; not_live_platform_verification"
     },
     "cockpit_send_capabilities": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [
@@ -80307,7 +80308,7 @@
     "cockpit_status": {
       "handler": "OlivOSCockpit.host._status",
       "handler_file": "OlivOSCockpit/host.py",
-      "handler_line": 288,
+      "handler_line": 289,
       "required_permission": null,
       "read_only": true,
       "profiles": [
@@ -80379,7 +80380,7 @@
     "cockpit_user_info": {
       "handler": "OlivOSCockpit.read_tools._read_spec.<locals>.handle",
       "handler_file": "OlivOSCockpit/read_tools.py",
-      "handler_line": 197,
+      "handler_line": 198,
       "required_permission": "real_account_read",
       "read_only": true,
       "profiles": [

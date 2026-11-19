@@ -1,6 +1,6 @@
 # 受控操作
 
-仅在用户已授权具体操作时加载本参考。服务端开关允许调用，不等于用户授权了任意消息、账号或文件改动。只检查现有能力，不自行开启权限；Lite 不提供 Full-only 写工具。连接使用客户端当前配置的实际端点；端口回退后 8767 可能不再是真实端口。
+本参考用于准备受控操作或解读其结果。执行前仍须获得用户对具体操作的授权；服务端开关允许调用，不等于用户授权了任意消息、账号或文件改动。只检查现有能力，不自行开启权限；Lite 不提供 Full-only 写工具。连接使用客户端当前配置的实际端点；端口回退后 8767 可能不再是真实端口。
 
 ## 1. 通用操作门
 
@@ -25,7 +25,11 @@
 
 专用文本工具从实际列表选择 `cockpit_<adapter>_send_private/send_group` 等名称。目前公开族包括 dingtalk、discord、dodo_link、dodo_poll、fanbook、kaiheila、milky、red、telegram；telegram 还可能有 send 名称。按 schema 传 bot_hash、message、必要 target_id；dodo_poll 私聊还需要 host_id。不存在的专用工具不能靠猜名调用。
 
-发送结果的 `submitted: true` 不证明平台送达，delivery 可能恒为 unknown。若需要送达证据，只使用目标平台真正提供且本次任务已授权的查询，不伪造回执。
+- **QQ Guild v2 群发**：确认目标是 QQ 群还是频道子频道。发 QQ 群时用 `send_type: "group"`、`target_type: "qq_group"` 和用户确认的群 openid；发子频道时用 `"guild_channel"` 和子频道 ID。省略 `target_type` 仍走频道；不要从 ID 外观或对话历史猜路由。如果现场 schema 没有 `target_type`，停止 QQ 群发送，不省略该字段来试。
+- **Milky**：标准自动适配器账号可用通用工具或与私聊／群发方向对应的专用工具，按原样传正十进制字符串 `target_id`，不转换成浮点数。`submitted: true` 仅证明已进入 OlivOS 控制队列；队列不可用或已满是提交失败，不改用另一个工具补发。
+- **DoDo poll 私聊**：用户确认所属 `host_id` 后选支持该参数的专用工具；通用工具不具备该上下文。
+
+明确的本地拒绝与超时、断线等提交结果未知要分别报告；不要换另一条路径或裸 API 重放。`delivery: "unknown"` 不证明平台接受或送达。如需送达证据，只使用目标平台实际提供且已授权的查询；`cockpit_send_capabilities` 查询的是图片和语音能力，不能确认文本路由或送达。
 
 ## 3. 更新其他插件已有配置文件
 

@@ -8,6 +8,7 @@ from itertools import islice
 
 from . import fs, host
 from .contracts import (
+    MAX_ACCOUNT_ID_BITS,
     MAX_DEPTH,
     NAMESPACE,
     Outcome,
@@ -21,6 +22,7 @@ from .host import MISSING, safe, scalar
 LOGGER = logging.getLogger(__name__)
 
 SEND_TYPES = ('private', 'group')
+QQ_TARGET_TYPES = ('qq_group', 'guild_channel')
 MAX_MESSAGE = 64 * 1024
 MAX_ID = 256
 MAX_CONFIG_VALUE = 64 * 1024
@@ -29,6 +31,7 @@ LOW_LEVEL_PERMISSION = 'low_level_access'
 # 已核实会原样传递段列表的接收模式。old_string / olivos_string 等会把文本重新
 # 编码成 CQ/OP 串交给适配器再次解析，文本里的段语法可能变成媒体段。
 SAFE_MODES = frozenset(('olivos_para', 'obv12_para', 'milky_para_tx'))
+MILKY_MODELS = ('milky_default', 'llonebot_milky', 'lagrange_milky', 'yogurt_milky')
 # 白名单路径 → 已知宿主取值来源；不提供任意反射入口。
 PATHS = ('plugin_names', 'bot_hashes', 'olivos_version', 'olivos_svn')
 
@@ -70,7 +73,7 @@ def _identity(bot):
     if type(digest) is not str or not digest or len(digest) > MAX_ID:
         return None
     if not ((type(bot_id) is str and 0 < len(bot_id) <= MAX_ID)
-            or (type(bot_id) is int and bot_id.bit_length() <= 62)):
+            or (type(bot_id) is int and bot_id.bit_length() <= MAX_ACCOUNT_ID_BITS)):
         return None
     return digest, bot_id, triple
 
@@ -85,12 +88,42 @@ def _bound(event, bot, identity):
                     for key, expected in zip(('sdk', 'platform', 'model'), identity[2])))
 
 
-def _deliver(ctx, olivos, bot, identity, send_type, target, message, host_id=None):
+def _milky_submission(olivos, event, template, bot, send_type, target, message):
+    if not target.isascii() or not target.isdecimal():
+        raise ToolError('Milky target_id must be a positive decimal string')
+    peer_id = int(target)
+    if peer_id == 0 or peer_id.bit_length() > MAX_ACCOUNT_ID_BITS:
+        raise ToolError('Milky target_id is out of range')
+    post_type = safe(lambda: bot.post_info.type)
+    if type(post_type) is not str or post_type != 'auto':
+        raise ToolError('Milky account requires the native auto adapter')
+    queue = safe(lambda: event.plugin_info.get('control_queue'))
+    if not callable(safe(lambda: queue.put)):
+        raise ToolError('Milky control queue is unavailable')
+
+    def prepare():
+        segments = template.get('milky_para_tx')
+        if segments != [{'type': 'text', 'data': {'text': message}}]:
+            return None
+        sdk = olivos.milkySDK
+        if send_type == 'private':
+            action = sdk.API.send_private_message(user_id=peer_id, message=segments)
+        else:
+            action = sdk.API.send_group_message(group_id=peer_id, message=segments)
+        return sdk.send_post_event, action.gen_data(action.post_id)
+
+    prepared = safe(prepare)
+    if (type(prepared) is not tuple or not callable(prepared[0])
+            or type(prepared[1]) is not dict):
+        raise ToolError('Native Milky text submission is unavailable')
+    return prepared[0], prepared[1], queue
+
+
+def _deliver(ctx, olivos, bot, identity, send_type, target, message, host_id=None, target_type=None):
     """以已核实的原生单 text 段提交；成功返回 None，否则返回固定安全错误。
 
-    直接传 Message_templet 给 event.send，客户端字符串不进入宿主的 CQ/OP 段解析。
-    发送模式取自已构造事件；若宿主会把文本重新编码成字符串交给适配器再解析，
-    则拒绝，而不是退化成字符串发送让 `[CQ:image]` 之类的文本变成媒体段。
+    默认把 Message_templet 直接交给 event.send；Milky 使用同一模板的结构化文本段。
+    拒绝会把客户端文本重新编码成 CQ/OP 字符串再解析的消息模式。
     """
     def build():
         template = olivos.messageAPI.Message_templet(
@@ -106,15 +139,58 @@ def _deliver(ctx, olivos, bot, identity, send_type, target, message, host_id=Non
     if (safe(lambda: template.active) is not True or type(mode) is not str
             or mode not in SAFE_MODES):
         return failure('Adapter message mode does not support safe text-only submission')
+    sdk, platform, model = identity[2]
+    # 固定基线的合成事件没有被动私聊上下文；这些路径不会调用发送适配器。
+    if send_type == 'private':
+        if sdk in ('qqGuild_link', 'dodobot_ea'):
+            return failure('Adapter does not support active private message submission')
+        if sdk == 'dodo_poll' and host_id is None:
+            return failure('DoDo poll private submission requires host_id in its dedicated tool')
+    if sdk == 'dodobot_ea':
+        queues = safe(lambda: event.plugin_info.get('tx_queue'))
+        if type(queues) not in (list, tuple) or not queues:
+            return failure('DoDo EA message submission queue is unavailable')
+    if sdk == 'milky' and platform == 'qq':
+        return failure('Host adapter dispatch does not support this Milky account model')
+    milky = None
+    if sdk == 'onebot' and platform == 'qq' and model in MILKY_MODELS:
+        if mode != 'milky_para_tx':
+            return failure('Native Milky text submission is unavailable')
+        try:
+            milky = _milky_submission(olivos, event, template, bot, send_type, target, message)
+        except ToolError as exc:
+            return failure(str(exc))
+    elif target_type == 'qq_group':
+        # 宿主读取 Event.data.extend，而不是构造前的 fake SDK 事件。
+        flags = {'flag_from_qq': True}
+        if (safe(lambda: setattr(event.data, 'extend', flags)) is MISSING
+                or safe(lambda: event.data.extend) is not flags):
+            return failure('Native QQ group submission is unavailable')
     data = host.bot_info_dict(ctx.proc)
-    if data is None or safe(lambda: data.get(identity[0])) is not bot or not _bound(
-            event, bot, identity):
+    if (data is None or safe(lambda: data.get(identity[0])) is not bot
+            or _identity(bot) != identity or not _bound(event, bot, identity)):
         return failure('Account binding changed before message submission')
     if not host.unchanged(ctx):
         return failure('Configuration changed before message submission')
-    # send() 的返回值（常见为 None）不据此断言送达；异常才表示失败。
-    if safe(lambda: event.send(send_type, target, template, host_id=host_id)) is MISSING:
+    if milky is not None:
+        enqueue, packet, queue = milky
+        # Action.call 会吞掉入队失败并等待回包；这里只确认原生控制队列接收。
+        if safe(lambda: enqueue(identity[0], packet, queue)) is not None:
+            return failure('Milky control queue submission failed safely')
+        return None
+    result = safe(lambda: event.send(send_type, target, template, host_id=host_id))
+    if result is MISSING:
         return failure('Message submission failed safely')
+    # 正常调用也可能返回 None，只识别 QQ Guild v2 明确标记的本地拒绝。
+    if (sdk == 'qqGuildv2_link' and issubclass(type(result), dict)
+            and dict.get(result, 'active') is False):
+        result_data = dict.get(result, 'data')
+        if type(result_data) is dict:
+            operation, error = result_data.get('operation'), result_data.get('error')
+            if (type(operation) is str and operation == 'send' and type(error) is str and error
+                    and all(result_data.get(key, MISSING) is None
+                            for key in ('http_status', 'error_code', 'response'))):
+                return failure('Host rejected message submission locally')
     return None
 
 
@@ -126,6 +202,11 @@ def _send(ctx, args):
     send_type = _string(args, 'send_type')
     if send_type not in SEND_TYPES:
         raise ToolError('send_type must be private or group')
+    target_type = None
+    if 'target_type' in args:
+        target_type = _string(args, 'target_type')
+        if target_type not in QQ_TARGET_TYPES:
+            raise ToolError('target_type must be qq_group or guild_channel')
     target = _string(args, 'target_id')
     message = _string(args, 'message', limit=MAX_MESSAGE, max_bytes=MAX_MESSAGE)
     data = host.bot_info_dict(ctx.proc)
@@ -135,10 +216,12 @@ def _send(ctx, args):
     identity = _identity(bot)
     if identity is None or identity[0] != hash_:
         return failure('Unknown bot_hash')
+    if target_type is not None and (send_type != 'group' or identity[2][0] != 'qqGuildv2_link'):
+        return failure('target_type is only supported for QQ Guild v2 group submission')
     olivos = ctx.olivos
     if olivos is None:
         return failure('Host message API unavailable')
-    failed = _deliver(ctx, olivos, bot, identity, send_type, target, message)
+    failed = _deliver(ctx, olivos, bot, identity, send_type, target, message, target_type=target_type)
     if failed is not None:
         return failed
     return Outcome({'submitted': True, 'send_type': send_type, 'target_id': target,
@@ -270,12 +353,15 @@ TOOLS = (
     ToolSpec(
         name='cockpit_send',
         description=(
-            'Send a message through the host SDK as the given configured account. '
-            'Submission is not proof of delivery; delivery is reported as unknown.'
+            'Send text as the given configured account. For QQ Guild v2 group sends, '
+            'set target_type=qq_group for a QQ group; omission keeps guild_channel routing. '
+            'Submission is not proof of delivery.'
         ),
         schema=object_schema({
             'bot_hash': {'type': 'string', 'minLength': 1},
             'send_type': {'type': 'string', 'enum': list(SEND_TYPES)},
+            'target_type': {'type': 'string', 'enum': list(QQ_TARGET_TYPES),
+                            'description': 'Optional QQ Guild v2 group route; default is guild_channel.'},
             'target_id': {'type': 'string', 'minLength': 1},
             'message': {'type': 'string', 'minLength': 1, 'maxLength': MAX_MESSAGE},
         }, ('bot_hash', 'send_type', 'target_id', 'message')),

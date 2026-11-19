@@ -35,6 +35,7 @@ import sys
 import tempfile
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 import zipfile
@@ -358,6 +359,48 @@ with tempfile.TemporaryDirectory() as directory:
                                 'MCP-Protocol-Version':'2025-11-25'})
         status, _, result = post({'jsonrpc':'2.0','method':'notifications/initialized'}, legacy)
         assert status == 202 and result is None
+        call_map = {tool.name: tool.handler for tool in TOOLS}
+        bots = loader.Proc_data['bot_info_dict']
+        qq = OlivOS.API.bot_info_T(id=11001, platform_sdk='qqGuildv2_link', platform_platform='qqGuild',
+                                  platform_model='public')
+        milky = OlivOS.API.bot_info_T(id=(1 << 123) + 7, platform_sdk='onebot', platform_platform='qq',
+                                     platform_model='milky_default', server_type='auto')
+        bots.update({qq.hash: qq, milky.hash: milky})
+        message = '[CQ:image,file=literal][OP:at,id=3]'
+        args = {'bot_hash': qq.hash, 'send_type': 'group', 'target_id': '123', 'message': message}
+        qq_api = OlivOS.qqGuildv2SDK.event_action
+        with patch.object(qq_api, 'send_qq_msg', return_value=None) as qq_group, \
+             patch.object(qq_api, 'send_msg', return_value=None) as guild_channel:
+            out = call_map['cockpit_send'](main._context, dict(args, target_type='qq_group'))
+            assert not out.is_error, out.data
+            qq_group.assert_called_once()
+            guild_channel.assert_not_called()
+            assert qq_group.call_args.kwargs['force_active'] is True
+            for change in ({'target_type': 'guild_channel'}, {}):
+                out = call_map['cockpit_send'](main._context, dict(args, **change))
+                assert not out.is_error, out.data
+            assert guild_channel.call_count == 2 and qq_group.call_count == 1
+        previous_queue = loader.Proc_info.control_queue
+        control_queue = queue.Queue(maxsize=1)
+        loader.Proc_info.control_queue = control_queue
+        args = {'bot_hash': milky.hash, 'target_id': '9007199254740993', 'message': message}
+        for name, direction, id_key in (('cockpit_send', 'group', 'group_id'),
+                                        ('cockpit_milky_send_private', 'private', 'user_id')):
+            payload = dict(args, send_type=direction) if name == 'cockpit_send' else args
+            out = call_map[name](main._context, payload)
+            assert not out.is_error and out.data['submitted'] and out.data['delivery'] == 'unknown', out.data
+            failed = call_map[name](main._context, payload)
+            assert failed.is_error, failed.data
+            packet = control_queue.get_nowait()
+            assert packet.action == 'send' and packet.key['target'] == {'type': 'milky_auto', 'hash': milky.hash}
+            native = packet.key['data']['data']
+            assert native['action'] == 'send_' + direction + '_message' and native['post_id']
+            assert native['params'] == {id_key: 9007199254740993,
+                                        'message': [{'type': 'text', 'data': {'text': message}}]}
+            assert control_queue.empty()
+        bots.pop(qq.hash)
+        bots.pop(milky.hash)
+        loader.Proc_info.control_queue = previous_queue
         for revision, modern_call in enumerate((False, True)):
             package_manifest = dict(manifest.data['manifest'], namespace='InstallerSmoke',
                                     name='Installer smoke', version='v0.0.' + str(revision))

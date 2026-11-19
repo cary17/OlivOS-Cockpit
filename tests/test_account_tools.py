@@ -491,6 +491,26 @@ class AccountToolsTests(unittest.TestCase):
         self.rejects(self.update)
         self.assertEqual((moved / 'account.json').read_bytes(), self.original)
 
+    def test_large_account_ids_are_exact_in_both_eras_and_still_redacted(self):
+        safe_id = (1 << 53) - 1
+        ids = [safe_id, -safe_id, safe_id + 2, -safe_id - 2, (1 << 256) - 1, '00123']
+        self.write_json(self.target, {'account': [account(value) for value in ids]})
+        original = self.target.read_bytes()
+        outcome = self.read()
+        expected = [ids[0], ids[1], *(str(value) for value in ids[2:])]
+        for modern in (False, True):
+            body = protocol.result_body(1, protocol.tool_result(outcome, ''), modern)
+            for settings, expected_ids in (
+                (self.manager.current, expected),
+                (replace(self.manager.current, redact_fields=('id',)), ['[REDACTED]'] * len(ids)),
+            ):
+                result = json.loads(protocol.encode_reply(body, modern, policy=settings).body)['result']
+                data = result['structuredContent']
+                self.assertEqual([row['account']['id'] for row in data['accounts']], expected_ids)
+                self.assertEqual(json.loads(result['content'][0]['text']), data)
+                self.assertEqual(data['sha256'], hashlib.sha256(original).hexdigest())
+        self.unchanged(original)
+
     def test_common_outbound_redaction_can_be_disabled_or_overridden_without_mutation(self):
         outcome = self.read()
         original = copy.deepcopy(outcome.data)

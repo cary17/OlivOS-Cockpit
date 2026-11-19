@@ -1,7 +1,7 @@
 """本地配置与脱敏规则：只读写控制目录内的两个文件，发布不可变快照。
 
 本模块不监听端口、不导入 aiohttp；阻塞 I/O 只发生在监督线程内。
-控制目录（含临时文件）由普通文件工具永久禁止访问，见 is_protected。
+普通文件工具通过 fs 的路径策略永久拒绝访问控制目录（含临时文件）。
 """
 
 import concurrent.futures
@@ -138,6 +138,9 @@ def is_protected(data_root, path):
         return True
     if (type(path) is not str or not path or '\x00' in path
             or '..' in path.replace('\\', '/').split('/')):
+        return True
+    # Python 3.13 不再将有根无盘符的 Windows 路径视为绝对路径，不能借拼接补盘符。
+    if fs._WINDOWS and os.path.splitdrive(path)[0] == '' and path[0] in '/\\':
         return True
     target = path if os.path.isabs(path) else os.path.join(data_root, path)
     try:

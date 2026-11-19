@@ -34,7 +34,13 @@
 
 ### 适配器文本发送（仅 Full）
 
-19 个适配器单 text 段发送工具显式绑定于 `adapter_tools.py`。固定基线下仅支持字符串重解析的 OPQ、BiliLive、HackChat、MhyVila、Xiaoheihe 专用项只内部登记，不公开。`cockpit_send` 与它们都只构造**单个 text 段**，不接受媒体段、文件路径参数、原始 payload 或动态 action。仅在原生消息模式能安全传递段列表时提交；会把文本重新编码后解析为 CQ/OP 的适配器模式返回 `isError`，不做不安全回退。因而静态注册不等于所有适配器当前可执行。提交成功不代表送达，`delivery` 恒为 `unknown`。
+19 个适配器单 text 段发送工具显式绑定于 `adapter_tools.py`。固定基线下仅支持字符串重解析的 OPQ、BiliLive、HackChat、MhyVila、Xiaoheihe 专用项只内部登记，不公开。`cockpit_send` 与它们都只构造**单个 text 段**，不接受媒体段、文件路径参数、原始 payload 或动态 action。仅在原生消息模式能安全传递段列表时提交；会把文本重新编码后解析为 CQ/OP 的适配器模式返回 `isError`，不做不安全回退。因而静态注册不等于所有适配器当前可执行。
+
+- **QQ Guild v2**：仅 `cockpit_send` 的 `send_type: "group"` 接受可选 `target_type`。发 QQ 群时传 `"qq_group"` 和该账号可用的 QQ 群 openid；发频道子频道时传 `"guild_channel"` 和子频道 ID。省略时保持频道路由，不按 ID 外观或入站事件猜测。识别到宿主明确的本地拒绝时返回工具错误，不回显原生错误详情。
+- **Milky**：标准 `onebot / qq` Milky 模型须使用宿主自动适配器。通用和专用工具走同一原生控制队列；`target_id` 为正十进制字符串（至多 256 bits），不经浮点数转换。队列不可用、已满或入队失败返回 `isError: true`，不走其他发送路径；成功只说明宿主控制队列已接收，不等待适配器回包。
+- QQ Guild v1 主动私聊、通用工具缺 `host_id` 的 DoDo poll 私聊，以及没有可用发送分支或队列的 DoDo EA 仍返回 `isError: true`。DoDo poll 专用私聊工具可显式传入 `host_id`。
+
+`submitted: true` 不代表远端接受或送达，`delivery` 恒为 `unknown`。对仍使用 `event.send()` 的路径，宿主返回 `None` 不能单独用来判断失败。发送与原生查询使用同一个 256-bit 整数账号 ID 校验上限，不等于下游支持任意长度的目标 ID。
 
 dingtalk/discord 的 `API.sendGroupMessage` / `API.sendPrivateMessage` / `API.sendMessage` 是不公开的低层裸 API（需调用方自造 msgKey/embeds、绕过段落处理）；已发布的 dingtalk/discord 文本发送工具走 `event_action.send_msg` 段列表的安全路径，与裸 API 无关。
 
@@ -105,6 +111,8 @@ JSON 另做严格解析与解码前结构预算。不保证目标插件自动重
 `cockpit_accounts_config` 读取标准磁盘启动配置声明的账号文件：`<cwd>/conf/basic.json` 与 `conf/config.json` 补丁，复用宿主 `get_patch_config` 的合并语义；真正缺失时使用原生启动默认值。参考版本默认模型 `models.OlivOS_account_config.data.path` 为 `./conf/account.json`。损坏或被禁止的启动文件不回退，也不新增手工路径配置项。
 
 结果明确标为 `source: "configured_file"`、`path_source: "disk_boot_configuration"`、`runtime_active_config: "unknown"`，不能当成总控当前内存配置；保留停用账号和未知字段，凭据在统一出站边界处理。文件 ≤1 MiB、账号 ≤500，分页最多 50 条，`sha256` 来自完整原文而不是脱敏后的正文。
+
+`cockpit_bots` 与 `cockpit_accounts_config` 的账号 `id` 如为超出 JavaScript 安全整数范围（±`9007199254740991`）的整数，会在输出视图中转成精确十进制字符串。字段名仍是 `id`，脱敏规则照常生效；安全范围内的整数与既有字符串不改类型。超过 256-bit 预算的运行时整数 ID 以 `null` 表示未知，磁盘读取仍按原有预算拒绝超限记录。转换不改变宿主对象、磁盘文件、文件摘要或 JSON-RPC 请求 ID。
 
 `cockpit_accounts_update` 用 `index`、`expected_sha256`、`changes` 修改已有账号，仅允许 `enable` / `debug` 布尔值、`password` 和 `server.access_token`。凭据最多 4096 个 ASCII 字符，限字母数字及 `_.:@+=/-`，拒绝 `[REDACTED]` 占位符；空字符串表示显式清空凭据，仍须通过宿主校验，可能影响账号连接或鉴权。ID、SDK/model、endpoint、路径及路由字段不可改。写前执行原生纯校验（固定基线的原生校验器拒绝未知顶层/server 字段，因此“保留未知数据并校验已知部分”不等于整份存档必被宿主接受加载），保留未知与未修改字段，提交前再核对账号文件及启动配置修订，提交后同样执行上文的核验。
 

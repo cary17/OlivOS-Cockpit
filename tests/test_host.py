@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -50,8 +52,9 @@ class Event:
         self.calls = sdk.calls
         self.active = True
         self.bot_info = bot
-        self.platform = {'sdk': 'qq', 'platform': 'qq', 'model': 'model'}
-        self.plugin_info = {'message_mode_rx': 'olivos_para'}
+        self.data = SimpleNamespace()
+        self.platform = vars(bot.platform).copy() if bot is not None else {}
+        self.plugin_info = {'message_mode_rx': 'olivos_para', 'tx_queue': []}
 
     def send(self, send_type, target_id, message, host_id=None):
         self.calls.append(('send', send_type, target_id, message))
@@ -309,6 +312,18 @@ class BotsTests(unittest.TestCase):
         proc.Proc_data = {}
         self.assertTrue(host.TOOLS[1].handler(ctx, {}).is_error)
 
+    def test_runtime_account_id_is_precise_and_never_mutates_the_account(self):
+        ids = [9007199254740991, -9007199254740993, (1 << 256) - 1, 1 << 256, '00123']
+        bots = {str(index): Bot(str(index)) for index in range(len(ids))}
+        for bot, value in zip(bots.values(), ids):
+            bot.id = value
+        ctx, _, _ = make(bots)
+        out = host.TOOLS[1].handler(ctx, {})
+        self.assertFalse(out.is_error, out.data)
+        self.assertEqual([entry['id'] for entry in out.data['bots']],
+                         [ids[0], str(ids[1]), str(ids[2]), None, ids[4]])
+        self.assertEqual([bot.id for bot in bots.values()], ids)
+
     def test_malicious_object_skipped(self):
         class Slotted:
             __slots__ = ()
@@ -363,6 +378,79 @@ class SendTests(unittest.TestCase):
         self.assertEqual(send[3].mode_rx, 'olivos_para')
         self.assertEqual([(para.type, para.data) for para in send[3].data],
                          [('text', {'text': 'hello'})])
+
+    def test_known_noop_paths_are_rejected_before_host_send(self):
+        for sdk_name, platform, model, direction in (
+            ('qqGuild_link', 'qqGuild', 'public', 'private'),
+            ('dodo_poll', 'dodo', 'default', 'private'),
+            ('dodobot_ea', 'dodo', 'default', 'private'),
+            ('dodobot_ea', 'dodo', 'default', 'group'),
+            ('milky', 'qq', 'llonebot_default', 'private'),
+        ):
+            with self.subTest(sdk=sdk_name, model=model, direction=direction):
+                ctx, sdk, proc = authorized()
+                bot = Bot('hash-a')
+                bot.platform = Platform(sdk_name, platform, model)
+                proc.Proc_data['bot_info_dict'] = {bot.hash: bot}
+                out = self.spec.handler(ctx, dict(SEND_ARGS, send_type=direction))
+                self.assertTrue(out.is_error, out.data)
+                self.assertEqual([call for call in sdk.calls if call[0] == 'send'], [])
+
+    def test_qq_group_route_is_explicit_and_keeps_channel_default(self):
+        ctx, _, proc = authorized()
+        bot = Bot('hash-a')
+        bot.platform = Platform('qqGuildv2_link', 'qqGuild', 'public')
+        proc.Proc_data['bot_info_dict'] = {bot.hash: bot}
+        routes = []
+
+        def record(event, *args, **kwargs):
+            routes.append(getattr(event.data, 'extend', {}).get('flag_from_qq', False))
+
+        with patch.object(Event, 'send', record):
+            for kwargs in ({'target_type': 'qq_group'}, {'target_type': 'guild_channel'}, {}):
+                out = self.spec.handler(ctx, dict(SEND_ARGS, send_type='group', **kwargs))
+                self.assertFalse(out.is_error, out.data)
+            self.assertTrue(self.spec.handler(ctx, dict(SEND_ARGS, target_type='qq_group')).is_error)
+        self.assertEqual(routes, [True, False, False])
+
+    def test_account_id_budget_is_256_bits(self):
+        for value, rejected in (((1 << 256) - 1, False), (1 << 256, True)):
+            with self.subTest(rejected=rejected):
+                ctx, sdk, proc = authorized()
+                bot = Bot('hash-a')
+                bot.id = value
+                proc.Proc_data['bot_info_dict'] = {bot.hash: bot}
+                out = self.spec.handler(ctx, dict(SEND_ARGS))
+                self.assertEqual(out.is_error, rejected, out.data)
+                self.assertEqual(len([call for call in sdk.calls if call[0] == 'send']), int(not rejected))
+
+    def test_detects_only_verified_local_qq_guild_v2_send_rejection(self):
+        class NativeResult(dict):
+            def get(self, *args):
+                raise AssertionError('use built-in dict access for the native wrapper')
+
+        local = {'operation': 'send', 'error': 'SECRET' * 20000,
+                 'http_status': None, 'error_code': None, 'response': None}
+        for result, rejected in (
+            (NativeResult(active=False, data=local), True),
+            (NativeResult(active=False, data=dict(local, http_status=403)), False),
+            (NativeResult(active=False, data={'operation': 'send', 'error': 'aggregate'}), False),
+            (NativeResult(active=True, data=local), False),
+            (None, False),
+        ):
+            with self.subTest(rejected=rejected):
+                ctx, _, proc = authorized()
+                bot = Bot('hash-a')
+                bot.platform = Platform('qqGuildv2_link', 'qqGuild', 'public')
+                proc.Proc_data['bot_info_dict'] = {bot.hash: bot}
+                with patch.object(Event, 'send', return_value=result) as send:
+                    out = self.spec.handler(ctx, dict(SEND_ARGS))
+                send.assert_called_once()
+                self.assertEqual(out.is_error, rejected)
+                if rejected:
+                    self.assertEqual(out.data, {'error': 'Host rejected message submission locally'})
+                else:
+                    self.assertEqual(out.data['delivery'], 'unknown')
 
     def test_message_segment_syntax_is_not_parsed(self):
         ctx, sdk, _ = authorized()
@@ -434,6 +522,14 @@ class SendTests(unittest.TestCase):
             validate_arguments(self.spec, dict(SEND_ARGS, extra=1))
         with self.assertRaises(ToolError):
             validate_arguments(self.spec, dict(SEND_ARGS, message=''))
+        validate_arguments(self.spec, dict(SEND_ARGS, send_type='group', target_type='qq_group'))
+        for invalid in (None, True, 'auto'):
+            with self.subTest(invalid=invalid), self.assertRaises(ToolError):
+                validate_arguments(self.spec, dict(SEND_ARGS, target_type=invalid))
+        ctx, sdk, _ = authorized()
+        out = self.spec.handler(ctx, dict(SEND_ARGS, send_type='group', target_type='guild_channel'))
+        self.assertTrue(out.is_error, out.data)
+        self.assertEqual(sdk.calls, [])
 
     def test_send_message_utf8_byte_budget(self):
         ctx, sdk, _ = authorized()

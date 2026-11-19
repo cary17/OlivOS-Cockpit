@@ -15,6 +15,7 @@ from .contracts import (
     failure,
     object_schema,
     validate_arguments,
+    wire_account_id,
 )
 
 _MODEL = 'OlivOS_account_config'
@@ -199,12 +200,18 @@ def cockpit_accounts_config(ctx, args):
     offset, limit = args.get('offset', 0), args.get('limit', MAX_PAGE)
     end = min(len(accounts), offset + limit)
     more = end < len(accounts)
+    rows = []
+    for index in range(offset, end):
+        account = accounts[index].copy()
+        if 'id' in account:
+            account['id'] = wire_account_id(account['id'])
+        rows.append({'index': index, 'account': account})
     return Outcome({
         'source': 'configured_file',
         'path_source': 'disk_boot_configuration',
         'runtime_active_config': 'unknown',
         'sha256': revision,
-        'accounts': [{'index': index, 'account': accounts[index]} for index in range(offset, end)],
+        'accounts': rows,
         'total': len(accounts),
         'offset': offset,
         'limit': limit,

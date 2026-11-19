@@ -49,6 +49,7 @@ metadata:
 | 文件工具报告平台或路径错误 | 读结构化错误；按现场 schema 查看 `cockpit_status` / `cockpit_host_info` 可提供的环境信息；缺少 OS、Python 3.11 位数或架构信息时请维护者在宿主本地核实。Windows 中未解析的短名拒绝项可能连带拒绝同目录更新；请维护者本地核对 `denied_paths`，停止该路径，不换绝对路径、`..`、链接别名或 shell 绕过 |
 | 模拟用户消息 | 先确认 `debug_terminal.selected` → 用户授权具体测试消息/上下文 → `cockpit_terminal_input` |
 | 发真实消息、改配置/账号、重载、拦截或安装/更新 OPK | 先读现状、明确影响并确认用户授权，再读 [受控操作](references/operations.md) |
+| 判断一次真实消息是否已提交 | 读 [真实账号消息发送的结果边界](references/operations.md#2-真实账号消息发送)；只解读既有结果，不补发 |
 | 查询群、成员、消息或账号类型 | 按 [工具路由与读取](references/tool-guide.md) 选择单个查询，再核对现场 schema |
 
 ## 4. 标准排障流程
@@ -101,7 +102,7 @@ metadata:
 {"name":"cockpit_accounts_config","arguments":{"offset":0,"limit":20}}
 ```
 
-按返回的 `offset/limit/total/truncated` 判断是否需要下一页；需要时增加 offset。`accounts[].index` 是文件索引，`sha256` 是整份原文修订。读页期间核对修订是否一致；写前重新读取目标条目，不能混用旧索引与新修订。存档包含停用账号，`runtime_active_config='unknown'`，不代表当前运行状态。
+按返回的 `offset/limit/total/truncated` 判断是否需要下一页；需要时增加 offset。`accounts[].index` 是文件索引，`sha256` 是整份原文修订。读页期间核对修订是否一致；写前重新读取目标条目，不能混用旧索引与新修订。存档包含停用账号，`runtime_active_config='unknown'`，不代表当前运行状态。`cockpit_bots` 和 `cockpit_accounts_config` 会以十进制字符串返回超出 JavaScript 安全整数范围的账号 `id`；比较或转述大 ID 时保留原字符串，不转成浮点数。
 
 控制目录和本插件数据 namespace 永久拒绝。普通读取限于允许根内的日志、包元数据与其他插件数据，不能借此读取任意宿主源码或整体包体。POSIX/macOS 与 Windows 使用各自的安全文件后端；OPK 不按 CPU 架构拆分，宿主仍须运行 Python 3.11。遇到路径拒绝或安全文件能力错误时，按上方平台排错路由核实宿主环境后停止该路径；不要改用绝对路径、`..`、链接/reparse 别名、解包或宿主反射绕过。自动化 OS/架构矩阵通过不等于具体 OlivOS 发行包、容器或宿主已完成运行验收。
 

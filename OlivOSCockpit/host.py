@@ -13,6 +13,7 @@ from .contracts import (
     ToolSpec,
     failure,
     object_schema,
+    wire_account_id,
 )
 
 MAX_TEXT = 200
@@ -126,7 +127,7 @@ def _bot(bot_hash, bot):
         digest = scalar(bot_hash) if type(bot_hash) is str else None
     return {
         'hash': digest,
-        'id': scalar(fields.get('id')),
+        'id': wire_account_id(scalar(fields.get('id'))),
         'platform': _platform(fields.get('platform')),
         'connection': 'unknown',
     }

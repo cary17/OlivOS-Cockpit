@@ -16,6 +16,8 @@ MAX_MANIFEST = 64 * 1024
 MAX_OPK = 8 * 1024 * 1024
 MAX_ZIP_DIRECTORY = 256 * 1024
 MAX_ZIP_ENTRIES = 1024
+MAX_ACCOUNT_ID_BITS = 256
+MAX_SAFE_JSON_INTEGER = (1 << 53) - 1
 MAX_DEPTH = 8
 MAX_CALLS = 8
 CALL_TIMEOUT = 10.0
@@ -26,6 +28,16 @@ MODE_FULL = 'full'
 MODE_LITE = 'lite'
 MAX_JSON_DEPTH = 32
 MAX_JSON_NODES = 20000
+
+
+def wire_account_id(value):
+    """账号视图整数 ID 的无损 JSON 表示；超出账号预算则标为未知。"""
+    if type(value) is int:
+        if value.bit_length() > MAX_ACCOUNT_ID_BITS:
+            return None
+        if not -MAX_SAFE_JSON_INTEGER <= value <= MAX_SAFE_JSON_INTEGER:
+            return str(value)
+    return value
 
 
 def check_json_budget(text, max_depth=MAX_JSON_DEPTH, max_nodes=MAX_JSON_NODES):

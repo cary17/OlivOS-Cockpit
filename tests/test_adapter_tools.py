@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,7 @@ class Bot:
         self.hash = hash_
         self.id = '10001'
         self.platform = Platform(sdk, platform, model)
+        self.post_info = SimpleNamespace(type='auto')
 
 
 class Snapshot:
@@ -249,11 +251,29 @@ class GuardTests(unittest.TestCase):
 
 
 class SubmissionTests(unittest.TestCase):
-    def test_milky_group_builds_single_text_segment(self):
+    def test_milky_has_no_event_send_fallback_without_control_queue(self):
         ctx, _, sdk = make()
-        out = spec('cockpit_milky_send_group').handler(ctx, dict(MILKY_ARGS))
+        for direction in ('group', 'private'):
+            with self.subTest(direction=direction):
+                out = spec(f'cockpit_milky_send_{direction}').handler(ctx, dict(MILKY_ARGS))
+                self.assertTrue(out.is_error, out.data)
+                self.assertEqual(out.data['error'], 'Milky control queue is unavailable')
+                self.assertEqual(sends(sdk), [])
+
+    def test_milky_invalid_target_is_rejected_before_submission(self):
+        ctx, _, sdk = make()
+        for target in ('0', '-1', '1.5', '1e9', '１２３', str(1 << 256)):
+            with self.subTest(target=target):
+                out = spec('cockpit_milky_send_group').handler(ctx, dict(MILKY_ARGS, target_id=target))
+                self.assertTrue(out.is_error, out.data)
+                self.assertIn('target_id', out.data['error'])
+                self.assertEqual(sends(sdk), [])
+
+    def test_telegram_group_builds_single_text_segment(self):
+        ctx, _, sdk = make()
+        out = spec('cockpit_telegram_send_group').handler(ctx, dict(MILKY_ARGS, bot_hash='t'))
         self.assertFalse(out.is_error, out.data)
-        self.assertEqual(out.data['adapter'], 'milky')
+        self.assertEqual(out.data['adapter'], 'telegram')
         self.assertEqual(out.data['send_type'], 'group')
         self.assertEqual(out.data['delivery'], 'unknown')
         sent = sends(sdk)[0]
@@ -266,8 +286,8 @@ class SubmissionTests(unittest.TestCase):
     def test_platform_hint_is_not_interpreted_as_segments(self):
         ctx, _, sdk = make()
         message = '[CQ:image,file=/etc/passwd]'
-        out = spec('cockpit_milky_send_group').handler(
-            ctx, dict(MILKY_ARGS, message=message))
+        out = spec('cockpit_telegram_send_group').handler(
+            ctx, dict(MILKY_ARGS, bot_hash='t', message=message))
         self.assertFalse(out.is_error)
         sent = sends(sdk)[0]
         self.assertEqual(sent[2].data[0].data['text'], message)
@@ -282,11 +302,13 @@ class SubmissionTests(unittest.TestCase):
 
         FakeEvent.__init__ = legacy
         try:
-            out = spec('cockpit_milky_send_group').handler(
-                ctx, dict(MILKY_ARGS, message='[CQ:image,file=/etc/passwd]'))
+            out = spec('cockpit_telegram_send_group').handler(
+                ctx, dict(MILKY_ARGS, bot_hash='t', message='[CQ:image,file=/etc/passwd]'))
         finally:
             FakeEvent.__init__ = original
         self.assertTrue(out.is_error)
+        self.assertEqual(out.data['error'],
+                         'Adapter message mode does not support safe text-only submission')
         self.assertEqual(sends(sdk), [])
 
     def test_private_and_host_id_paths(self):

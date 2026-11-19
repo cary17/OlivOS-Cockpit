@@ -11,14 +11,14 @@ xiaoheihe 等），相应专用工具仅内部登记，不进入公开工具表�
   绕过段落处理，保持不绑定。
 - 已发布的 dingtalk/discord 文本发送工具走 `event_action.send_msg` 接受
   段列表的安全路径，经 ENTRIES 正常公开，与上述裸 API 无关。
-- dodobot_ea：投递依赖插件级 `tx_queue`，合成事件拿不到该队列，消息会被丢弃。
+- dodobot_ea：投递依赖插件级 `tx_queue`；公共提交入口会拒绝缺队列的合成事件。
 - 其余 image/record/video/file 段、本地路径、URL、凭据与动态 action 一律不接受，
   因为它们会打开任意文件读取与出站请求通道。
 """
 
 from . import host
 from .contracts import Outcome, ToolError, ToolSpec, failure, object_schema
-from .full_only import MAX_MESSAGE, _deliver, _identity, _string
+from .full_only import MAX_MESSAGE, MILKY_MODELS, _deliver, _identity, _string
 
 MAX_ID = 256
 PERMISSION = host.REAL_ACCOUNT_WRITE
@@ -36,8 +36,8 @@ PLATFORMS = {
     'hackchat': ('hackChat_link', 'hackChat', ('default',)),
     'kaiheila': ('kaiheila_link', 'kaiheila', ('default', 'text', 'card')),
     'mhyvila': ('mhyVila_link', 'mhyVila', ('default',)),
-    'milky': ('onebot', 'qq',
-              ('milky_default', 'llonebot_milky', 'lagrange_milky', 'yogurt_milky')),
+    # 工具绑定保留；固定宿主的实际可执行性由公共提交入口判断。
+    'milky': ('onebot', 'qq', MILKY_MODELS),
     'red': ('onebot', 'qq', ('red',)),
     'telegram': ('telegram_poll', 'telegram', ('default',)),
     'xiaoheihe': ('xiaoheihe_link', 'xiaoheihe', ('default',)),
@@ -129,6 +129,8 @@ def _spec(adapter, action, send_type, target_name, extras):
     }
     if target_name is not None:
         properties[target_name] = {'type': 'string', 'minLength': 1, 'maxLength': MAX_ID}
+    if adapter == 'milky':
+        properties['target_id']['description'] = 'Positive decimal ID; submission means control-queue acceptance only.'
     for name in extras:
         properties[name] = {'type': 'string', 'minLength': 1, 'maxLength': MAX_ID}
     return ToolSpec(
