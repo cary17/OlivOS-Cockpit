@@ -2,12 +2,12 @@
 name: olivos-cockpit
 description: 通过已连接的 OlivOS Cockpit MCP 工具诊断机器人宿主、账号、插件、日志和事件，读取插件数据，执行已授权的虚拟终端测试、消息发送、受限配置操作与 Full 插件安装/更新。用于使用本插件，不用于开发、构建或修改其源码。
 metadata:
-  version: v0.3.0
+  version: v0.4.0
 ---
 
 # 使用 OlivOS Cockpit
 
-本 skill 与两个 OPK 使用同一发布版本（当前为 `v0.3.0`），发布包名为 `OlivOSCockpit.opk` / `OlivOSCockpitLite.opk`，skill 包名为 `olivos-cockpit-skill.zip`；文件名不带版本号，实际版本以包内清单与 skill metadata 为准，且版本号一致不代表某次修复已经部署，部署情况仍由维护者确认。
+本 skill 与两个 OPK 使用同一发布版本（当前为 `v0.4.0`），发布包名为 `OlivOSCockpit.opk` / `OlivOSCockpitLite.opk`，skill 包名为 `olivos-cockpit-skill.zip`；文件名不带版本号，实际版本以包内清单与 skill metadata 为准，且版本号一致不代表某次修复已经部署，部署情况仍由维护者确认。
 
 面向调用 MCP 工具的 agent。使用服务器提供的结构化入口完成排障与受控操作；不需要源码仓库，不直接访问宿主内存，也不以本地文件或 shell 绕过 MCP 的权限和路径限制。客户端本地文件读取/打包是客户端自身能力，不等于服务端可读同一路径；安装见 §7。
 
