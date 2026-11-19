@@ -1000,21 +1000,21 @@ class ManagedPortFallbackTests(unittest.TestCase):
             manager_thread.start()
             service_thread.start()
             try:
-                def current_port():
-                    try:
-                        return json.loads(path.read_text('utf-8'))['listen_port']
-                    except (OSError, ValueError, KeyError):
-                        return None
+                def fallback_published():
+                    # Windows 上轮询打开目标文件可能阻止配置管理器原子替换它。
+                    snapshot = manager.snapshot()
+                    return snapshot.ready and snapshot.listen_port != configured
 
-                self.assertTrue(wait_until(
-                    lambda: current_port() not in (None, configured), 10))
-                actual = current_port()
+                self.assertTrue(wait_until(fallback_published, 10),
+                                f'Fallback port was not published: {proc.messages!r}')
+                actual = manager.snapshot().listen_port
                 self.assertNotEqual(actual, configured)
                 self.assertGreaterEqual(actual, service.FALLBACK_MIN_PORT)
                 init = {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
                         'params': dict(INIT_PARAMS)}
                 self.assertTrue(wait_until(
-                    lambda: http_json(actual, init, token=VALID_KEY)[0] == 200, 10))
+                    lambda: http_json(actual, init, token=VALID_KEY)[0] == 200, 10),
+                    f'Fallback port did not serve MCP: {proc.messages!r}')
                 # 确认可服务后只记录一次实际端点；被占用的配置端口不得误报。
                 self.assertEqual(
                     [message for message in proc.messages
