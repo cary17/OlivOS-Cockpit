@@ -62,7 +62,7 @@ metadata:
 {"name":"cockpit_log","arguments":{"namespace":"target_plugin","lines":100}}
 ```
 
-`cockpit_log` 读取宿主日志目录；插件数据 namespace 中的 `.log` 文件仍用 `cockpit_data` 读取。
+`cockpit_log` 读取宿主日志目录；插件数据 namespace 中的 `.log` 文件仍用 `cockpit_data` 读取。若要判断 Cockpit 客户端活动或会话失效，见 [日志解读](references/tool-guide.md#2-账号日志数据和事件)。
 
 4. 若需判断“事件是否进入插件加载器”，再取少量 raw：
 

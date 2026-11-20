@@ -58,6 +58,10 @@ _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0
 class ConfigError(Exception):
     """固定安全错误；不携带文件内容或凭据。"""
 
+    def __init__(self, message, category='invalid_field'):
+        super().__init__(message)
+        self.category = category
+
 
 def config_template():
     return {
@@ -179,9 +183,9 @@ def _json(raw, label):
         check_json_budget(text)
         value = json.loads(text, object_pairs_hook=_unique, parse_constant=_bad_constant)
     except (UnicodeDecodeError, ValueError, OverflowError, RecursionError):
-        raise ConfigError(label + ' is not valid JSON') from None
+        raise ConfigError(label + ' is not valid JSON', 'invalid_json') from None
     if type(value) is not dict:
-        raise ConfigError(label + ' must be a JSON object')
+        raise ConfigError(label + ' must be a JSON object', 'invalid_json')
     return value
 
 
@@ -193,18 +197,19 @@ def _known(data, template, label):
 def _boolean(data, key, default):
     value = data.get(key, default)
     if type(value) is not bool:
-        raise ConfigError('Invalid boolean configuration value')
+        raise ConfigError(key + ' must be true or false')
     return value
 
 
 def _strings(data, key, max_chars, max_count):
     value = data.get(key, [])
     if type(value) is not list or len(value) > max_count:
-        raise ConfigError('Invalid list configuration value')
+        raise ConfigError('%s must be a list of at most %d strings' % (key, max_count))
     result = []
     for item in value:
         if type(item) is not str or not item or len(item) > max_chars or '\x00' in item:
-            raise ConfigError('Invalid list configuration value')
+            raise ConfigError('%s entries must be non-empty strings of at most %d characters without NUL'
+                              % (key, max_chars))
         if item not in result:
             result.append(item)
     return tuple(result)
@@ -212,39 +217,39 @@ def _strings(data, key, max_chars, max_count):
 
 def _host(value):
     if type(value) is not str or not value or len(value) > MAX_HOST_CHARS or '\x00' in value:
-        raise ConfigError('Invalid listen_host')
+        raise ConfigError('listen_host must be localhost or an IP address')
     if value == 'localhost':
         return value
     try:
         ipaddress.ip_address(value)
     except ValueError:
-        raise ConfigError('Invalid listen_host') from None
+        raise ConfigError('listen_host must be localhost or an IP address') from None
     return value
 
 
 def _port(value):
     if type(value) is not int or not 1 <= value <= 65535:
-        raise ConfigError('Invalid listen_port')
+        raise ConfigError('listen_port must be an integer from 1 to 65535')
     return value
 
 
 def _api_key(value):
     if type(value) is not str or len(value) > MAX_KEY_CHARS:
-        raise ConfigError('Invalid api_key')
+        raise ConfigError('api_key must be a string of at most %d characters' % MAX_KEY_CHARS)
     if not value:
         return ''
     if not _KEY_RE.match(value):
-        raise ConfigError('Invalid api_key format')
+        raise ConfigError('api_key must start with OlivOS- followed by 32–64 ASCII letters and digits')
     suffix = value[len(KEY_PREFIX):]
     if not (any('A' <= char <= 'Z' for char in suffix)
             and any('a' <= char <= 'z' for char in suffix)
             and any('0' <= char <= '9' for char in suffix)):
-        raise ConfigError('Invalid api_key format')
+        raise ConfigError('api_key must contain upper- and lowercase letters and a digit')
     return value
 
 
 def _config_values(data):
-    _known(data, config_template(), 'configuration')
+    _known(data, config_template(), CONFIG_NAME)
     return {
         'listen_host': _host(data.get('listen_host', DEFAULT_HOST)),
         'listen_port': _port(data.get('listen_port', DEFAULT_PORT)),
@@ -261,13 +266,15 @@ def _config_values(data):
 
 
 def _redaction_values(data):
-    _known(data, redaction_template(), 'redaction')
+    _known(data, redaction_template(), REDACTION_NAME)
     values = {
         'redact_fields': _strings(data, 'redact_fields', MAX_RULE_CHARS, MAX_RULES),
         'allow_fields': _strings(data, 'allow_fields', MAX_RULE_CHARS, MAX_RULES),
     }
-    if any(len(item.casefold()) > MAX_RULE_CHARS for fields in values.values() for item in fields):
-        raise ConfigError('Redaction field is too long')
+    for key, fields in values.items():
+        if any(len(item.casefold()) > MAX_RULE_CHARS for item in fields):
+            raise ConfigError('%s entries exceed %d characters after case folding'
+                              % (key, MAX_RULE_CHARS))
     return values
 
 
@@ -275,20 +282,21 @@ def _encode(template):
     return (json.dumps(template, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
 
 
-def _read_bounded(fd, limit):
+def _read_bounded(fd, limit, name):
     chunks = []
     total = 0
     while total <= limit:
         try:
             chunk = fs.read(fd, min(65536, limit + 1 - total))
         except OSError:
-            raise ConfigError('Configuration file is unavailable') from None
+            raise ConfigError(name + ' could not be read; check file type and permissions',
+                              'file_unreadable') from None
         if not chunk:
             break
         chunks.append(chunk)
         total += len(chunk)
     if total > limit:
-        raise ConfigError('Configuration file is too large')
+        raise ConfigError(name + ' exceeds the 64 KiB limit', 'file_too_large')
     return b''.join(chunks)
 
 
@@ -296,19 +304,21 @@ def _read_file(dir_fd, name):
     try:
         fd = fs.open_file(name, _FILE_FLAGS, dir_fd=dir_fd, directory=False)
     except FileNotFoundError:
-        raise ConfigError('Configuration file is missing') from None
+        raise ConfigError(name + ' is missing', 'file_missing') from None
     except OSError:
-        raise ConfigError('Configuration file is unavailable') from None
+        raise ConfigError(name + ' could not be read; check file type and permissions',
+                          'file_unreadable') from None
     try:
         info = fs.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
-            raise ConfigError('Configuration file type is not supported')
+            raise ConfigError(name + ' is not a regular file', 'file_type')
         if info.st_size > MAX_FILE:
-            raise ConfigError('Configuration file is too large')
-        data = _read_bounded(fd, MAX_FILE)
+            raise ConfigError(name + ' exceeds the 64 KiB limit', 'file_too_large')
+        data = _read_bounded(fd, MAX_FILE, name)
         return data, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
     except OSError:
-        raise ConfigError('Configuration file is unavailable') from None
+        raise ConfigError(name + ' could not be read; check file type and permissions',
+                          'file_unreadable') from None
     finally:
         fs.close(fd)
 
@@ -328,13 +338,15 @@ def _write_temp(dir_fd, name, data, original_info=None):
     try:
         fd = fs.open_file(temp, _WRITE_FLAGS, 0o600, dir_fd=dir_fd, directory=False)
     except OSError:
-        raise ConfigError('Configuration file is unavailable') from None
+        raise ConfigError(name + ' could not be written; check directory permissions and free space',
+                          'file_write_failed') from None
     try:
         offset = 0
         while offset < len(data):
             written = fs.write(fd, data[offset:])
             if written <= 0:
-                raise ConfigError('Configuration file is unavailable')
+                raise ConfigError(name + ' could not be written; check directory permissions and free space',
+                                  'file_write_failed')
             offset += written
         if original_info is not None:
             fs.preserve_permissions(fd, original_info)
@@ -346,7 +358,8 @@ def _write_temp(dir_fd, name, data, original_info=None):
         finally:
             fs.close(fd)
         if isinstance(exc, OSError):
-            raise ConfigError('Configuration file is unavailable') from None
+            raise ConfigError(name + ' could not be written; check directory permissions and free space',
+                              'file_write_failed') from None
         raise
 
 
@@ -357,13 +370,14 @@ def _create_new(dir_fd, name, data):
         staged = fs.stat_at(temp, dir_fd=dir_fd, follow_symlinks=False)
         owner = fs.fstat(fd)
         if (staged.st_dev, staged.st_ino) != (owner.st_dev, owner.st_ino):
-            raise ConfigError('Configuration staging file changed')
+            raise ConfigError(name + ' staging file changed before publication', 'staging_changed')
         try:
             fs.link(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except FileExistsError:
             return False
     except OSError:
-        raise ConfigError('Configuration file is unavailable') from None
+        raise ConfigError(name + ' could not be written; check directory permissions and free space',
+                          'file_write_failed') from None
     finally:
         try:
             _remove_temp(dir_fd, temp, fd)
@@ -404,7 +418,7 @@ def _replace_file(dir_fd, name, data, expected_identity):
         staged = fs.stat_at(temp, dir_fd=dir_fd, follow_symlinks=False)
         owner = fs.fstat(fd)
         if (staged.st_dev, staged.st_ino) != (owner.st_dev, owner.st_ino):
-            raise ConfigError('Configuration staging file changed')
+            raise ConfigError(name + ' staging file changed before publication', 'staging_changed')
         fs.replace(temp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         replaced = True
         try:
@@ -413,10 +427,11 @@ def _replace_file(dir_fd, name, data, expected_identity):
             pass
         raw, identity = _read_file(dir_fd, name)
         if raw != data or identity[:2] != (owner.st_dev, owner.st_ino):
-            raise ConfigError('Configuration file could not be verified')
+            raise ConfigError(name + ' could not be verified after write-back', 'writeback_verification_failed')
         return identity
     except OSError:
-        raise ConfigError('Configuration file is unavailable') from None
+        raise ConfigError(name + ' could not be written; check directory permissions and free space',
+                          'file_write_failed') from None
     finally:
         try:
             if not replaced:
@@ -430,19 +445,23 @@ def _child_dir(parent_fd, name, create):
         return fs.open_file(name, _DIR_FLAGS, dir_fd=parent_fd, directory=True)
     except FileNotFoundError:
         if not create:
-            raise ConfigError('Configuration directory is missing') from None
+            raise ConfigError('Control directory is missing; check the plugin data root',
+                              'directory_missing') from None
     except OSError:
-        raise ConfigError('Configuration directory is unavailable') from None
+        raise ConfigError('Control directory unavailable; check the plugin data root and permissions',
+                          'directory_unavailable') from None
     try:
         fs.mkdir(name, 0o700, dir_fd=parent_fd)
     except FileExistsError:
         pass
     except OSError:
-        raise ConfigError('Configuration directory is unavailable') from None
+        raise ConfigError('Control directory unavailable; check the plugin data root and permissions',
+                          'directory_unavailable') from None
     try:
         return fs.open_file(name, _DIR_FLAGS, dir_fd=parent_fd, directory=True)
     except OSError:
-        raise ConfigError('Configuration directory is unavailable') from None
+        raise ConfigError('Control directory unavailable; check the plugin data root and permissions',
+                          'directory_unavailable') from None
 
 
 def _fingerprint(parts):
@@ -552,49 +571,49 @@ class ConfigManager:
         try:
             self._poll_once()
         except ConfigError as exc:
-            self._fail(str(exc))
+            self._fail(str(exc), exc.category)
         except fs.ToolError:
-            self._fail('Configuration directory is unavailable')
+            self._fail('Control directory unavailable; check the plugin data root and permissions',
+                       'directory_unavailable')
         except OSError:
-            self._fail('Configuration files are unavailable')
+            self._fail('Control files unavailable; check the plugin data root and permissions',
+                       'file_unreadable')
 
     def run_forever(self):
         """在调用方的 daemon 线程内轮询；重复调用不会产生第二个监视器。"""
+        failed = set()
+
+        def run(action, message):
+            try:
+                action()
+            except BaseException:
+                if message not in failed:
+                    failed.add(message)
+                    self._log(message, 4)
+            else:
+                failed.discard(message)
+
         while not self._stop.is_set():
-            try:
-                self.refresh()
-            except BaseException:
-                # 后台线程顶层兜底，不记录原始异常。
-                self._log('Configuration monitor failed safely.')
-            try:
-                self._process_write_request()
-            except BaseException:
-                # 写回失败只结束等待方；不记录原始异常。
-                self._log('Configuration update failed safely.')
+            run(self.refresh, 'config.poll_failed: Unexpected error while polling control files.')
+            run(self._process_write_request, 'config.writeback_failed: Unexpected error while processing port write-back.')
             tick = self._tick_cb
             if tick is not None and not self._stop.is_set():
-                try:
-                    tick()
-                except BaseException:
-                    # 只读接缝的顶层兜底；不记录原始异常。
-                    self._log('Terminal tick failed safely.')
+                run(tick, 'config.tick_failed: Unexpected error in the supervision callback.')
             if self._stop.wait(POLL_INTERVAL):
                 return
 
-    def _log(self, message):
+    def _log(self, message, level):
         callback = self._log_cb
         if callback is None:
             return
         try:
-            callback(message)
+            callback(message, level)
         except BaseException:
             pass
 
     def _notify(self, snapshot):
         if snapshot is None:
             return
-        if not snapshot.valid:
-            self._log('Configuration unavailable: ' + (snapshot.error or 'unknown'))
         callback = self._notify_cb
         if callback is None:
             return
@@ -616,10 +635,12 @@ class ConfigManager:
         self._published_key = key
         return snapshot
 
-    def _fail(self, message):
+    def _fail(self, message, category):
         with self._lock:
             self._pending = None
             published = self._commit_locked(Snapshot(valid=False, error=message))
+        if published is not None:
+            self._log('config.%s: %s' % (category, message), 3)
         self._notify(published)
 
     def _observe(self, fingerprint, values):
@@ -705,7 +726,7 @@ class ConfigManager:
                 self._finish_write(request, False)
                 return
             try:
-                data = _json(config_raw, 'Configuration')
+                data = _json(config_raw, CONFIG_NAME)
                 values = _config_values(data)
             except ConfigError:
                 self._finish_write(request, False)
@@ -774,7 +795,8 @@ class ConfigManager:
         try:
             root_fd = fs.open_root(self.data_root)
         except fs.ToolError:
-            raise ConfigError('Configuration directory is unavailable') from None
+            raise ConfigError('Control directory unavailable; check the plugin data root and permissions',
+                              'directory_unavailable') from None
         try:
             ns_fd = _child_dir(root_fd, NAMESPACE_DIR, create)
         finally:
@@ -791,9 +813,10 @@ class ConfigManager:
                 try:
                     fs.close(fs.open_file(name, _FILE_FLAGS, dir_fd=dir_fd, directory=False))
                 except FileNotFoundError:
-                    raise ConfigError('Configuration file is missing') from None
+                    raise ConfigError(name + ' is missing', 'file_missing') from None
                 except OSError:
-                    raise ConfigError('Configuration file is unavailable') from None
+                    raise ConfigError(name + ' could not be opened; check file type and permissions',
+                                      'file_unreadable') from None
             return
         present = {}
         for name in (CONFIG_NAME, REDACTION_NAME):
@@ -803,13 +826,15 @@ class ConfigManager:
             except FileNotFoundError:
                 present[name] = False
             except OSError:
-                raise ConfigError('Configuration file is unavailable') from None
+                raise ConfigError(name + ' could not be opened; check file type and permissions',
+                                  'file_unreadable') from None
         # 先标记，创建失败后不重试，避免用户删除后又被自动补回。
         self._seeded = True
         for name, template in ((CONFIG_NAME, config_template()),
                                (REDACTION_NAME, redaction_template())):
             if not present[name] and not _create_new(dir_fd, name, _encode(template)):
-                raise ConfigError('Configuration file is missing')
+                raise ConfigError(name + ' could not be created; check directory permissions',
+                                  'file_create_failed')
 
     def _poll_once(self):
         dir_fd = self._control_fd(create=not self._seeded)
@@ -819,12 +844,8 @@ class ConfigManager:
             redaction_raw, redaction_id = _read_file(dir_fd, REDACTION_NAME)
         finally:
             fs.close(dir_fd)
-        try:
-            values = _config_values(_json(config_raw, 'Configuration'))
-            values.update(_redaction_values(_json(redaction_raw, 'Redaction rules')))
-        except ConfigError as exc:
-            self._fail(str(exc))
-            return
+        values = _config_values(_json(config_raw, CONFIG_NAME))
+        values.update(_redaction_values(_json(redaction_raw, REDACTION_NAME)))
         fingerprint = _fingerprint((
             (CONFIG_NAME, config_raw, config_id),
             (REDACTION_NAME, redaction_raw, redaction_id),

@@ -56,8 +56,34 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(sessions.version(oldest, 'owner'))
         self.assertEqual(sessions.version(extra, 'owner'), '2025-11-25')
 
+    def test_client_event_budget_recovers_after_a_minute(self):
+        logs = []
+        proc = SimpleNamespace(log=lambda level, text: logs.append((level, text)))
+        svc = service._Service(Context(proc, '/unused', '/unused/data'), None, (), 1)
+        self.addCleanup(svc.close)
+        with patch.object(service, 'monotonic', return_value=100.0) as clock:
+            for _ in range(2 * service._CLIENT_LOG_LIMIT):
+                svc._log_client('event')
+            self.assertEqual(len(logs), service._CLIENT_LOG_LIMIT)
+            clock.return_value += 60.0
+            svc._log_client('event')
+        self.assertEqual(len(logs), service._CLIENT_LOG_LIMIT + 1)
+        self.assertTrue(all(level == 2 for level, _ in logs))
+
 
 class ManagedStartupTests(unittest.TestCase):
+    def test_construction_failure_logs_error_and_notifies_waiter(self):
+        logs = []
+        proc = SimpleNamespace(log=lambda level, text: logs.append((level, text)))
+        context = Context(proc, '/unused', '/unused/data')
+        started = threading.Event()
+        with patch.object(service, '_construct_managed', side_effect=RuntimeError('host-secret')):
+            service._start_managed_thread(context, None, (), started)
+        self.assertTrue(started.is_set())
+        self.assertEqual([level for level, _ in logs], [4])
+        self.assertIn('service.setup_failed:', logs[0][1])
+        self.assertNotIn('host-secret', logs[0][1])
+
     def setup_service(self, stack, factory=None, lock=None):
         context = Context(None, '/unused', '/unused/data')
         manager = SimpleNamespace(stopped=False, snapshot=lambda: SimpleNamespace(valid=True, ready=True))

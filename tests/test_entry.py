@@ -197,9 +197,11 @@ class EntryTests(unittest.TestCase):
             with patch.object(main.service, 'apply_config', apply), \
                     patch.object(main, '_target', (context, manager)), \
                     patch.object(main.terminal, 'prepare', lambda ctx: ctx.terminal):
+                main._bind(context, manager)
                 self.assertFalse(manager.snapshot().ready)
                 manager.refresh()
                 manager.refresh()
+                self.assertEqual(self.messages, [])
                 # 模板 api_key 为空：监督回调可见但从不请求监听。
                 self.assertTrue(applied)
                 self.assertFalse(any(applied))
@@ -217,11 +219,17 @@ class EntryTests(unittest.TestCase):
                 manager.refresh()
                 self.assertTrue(manager.snapshot().ready)
                 self.assertIs(applied[-1], True)
+                self.assertEqual(self.messages, [])
 
                 (control / config.CONFIG_NAME).write_text('{', encoding='utf-8')
                 manager.refresh()
+                manager.refresh()
                 self.assertFalse(manager.snapshot().ready)
                 self.assertIs(applied[-1], False)
+                self.assertEqual(len(self.messages), 1)
+                self.assertEqual(self.messages[0][0], 3)
+                self.assertIn('config.invalid_json: config.json is not valid JSON',
+                              self.messages[0][1])
 
                 template['api_key'] = KEY
                 (control / config.CONFIG_NAME).write_text(
@@ -229,12 +237,17 @@ class EntryTests(unittest.TestCase):
                 manager.refresh()
                 manager.refresh()
                 self.assertTrue(manager.snapshot().ready)
+                (control / config.CONFIG_NAME).write_text('{', encoding='utf-8')
+                manager.refresh()
+                self.assertEqual(self.messages[1], self.messages[0])
                 # 已播种后再删除：不重建，按缺失安全失败。
                 (control / config.CONFIG_NAME).unlink()
                 manager.refresh()
                 self.assertFalse(manager.snapshot().ready)
                 self.assertIs(applied[-1], False)
                 self.assertFalse((control / config.CONFIG_NAME).exists())
+                self.assertIn('config.json is missing', self.messages[-1][1])
+                self.assertNotIn(KEY, str(self.messages))
 
     def test_init_after_only_starts_one_daemon_thread(self):
         context = Context(self.proc, '/unused', '/unused/data')
@@ -472,13 +485,17 @@ class EntryTests(unittest.TestCase):
     def test_missing_http_dependency_is_not_a_retryable_handover(self):
         context = Context(self.proc, '/unused', '/unused/data')
         manager = config.ConfigManager('/unused/data')
-        with patch.object(main, '_target', (context, manager)), \
-                patch.object(main, 'service') as fake:
+        with patch.object(main, 'service') as fake:
             fake.web = None
             fake.apply_config = lambda *a, **k: False
             fake.can_start = lambda: False
-            main._on_config(context, manager, manager.snapshot())
+            main._apply_context(self.proc, context, manager)
+            for _ in range(2):
+                main._on_config(context, manager, manager.snapshot())
         self.assertIsNone(main._pending)
+        dependency = [(level, text) for level, text in self.messages if 'aiohttp' in text]
+        self.assertEqual([level for level, _ in dependency], [4])
+        self.assertIn('service.dependency_unavailable:', dependency[0][1])
 
     def test_reinit_with_identical_context_sources_reuses_context_object(self):
         proc = self._managed_proc()

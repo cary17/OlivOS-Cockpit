@@ -337,8 +337,45 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 202)
                 self.assertEqual(await response.read(), b'')
 
+    async def test_modern_activity_uses_safe_labels_and_sliding_window(self):
+        logs = []
+        self.service.context = replace(CONTEXT, proc=SimpleNamespace(
+            log=lambda level, text: logs.append((level, text))))
+        body, headers = modern('tools/list')
+        claimed = body['params']['_meta'][protocol.META_CLIENT]
+        claimed.update(name='Claude Code', version=VALID_KEY)
+        response = await self.post(body, {**headers, 'Authorization': 'Bearer wrong'})
+        self.assertEqual(response.status, 401)
+        response = await self.post(body, {**headers, 'Mcp-Method': 'ping'})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(logs, [])
+
+        with patch.object(service, 'monotonic', return_value=100.0) as clock:
+            for moment in (100, 399, 698, 998):
+                clock.return_value = moment
+                response = await self.post(body, headers)
+                self.assertEqual(response.status, 200)
+                await response.read()
+            self.assertEqual(len(logs), 2)
+            self.assertTrue(all(level == 2 and 'client.modern_activity:' in text
+                                and 'client=Claude Code' in text for level, text in logs))
+            claimed['name'] = VALID_KEY + '\nclient=spoofed'
+            response = await self.post(body, {**headers, 'User-Agent': 'codex/1.2'})
+            self.assertEqual(response.status, 200)
+            self.assertIn('client=Codex', logs[-1][1])
+            response = await self.post(body, {**headers, 'User-Agent': VALID_KEY})
+            self.assertEqual(response.status, 200)
+            self.assertIn('client=unknown', logs[-1][1])
+        self.assertNotIn(VALID_KEY, str(logs))
+        self.assertNotIn('spoofed', str(logs))
+        self.assertEqual(self.service.sessions._items, {})
+
     async def test_legacy_lifecycle(self):
-        body, headers = legacy('initialize', INIT_PARAMS)
+        logs = []
+        self.service.context = replace(CONTEXT, proc=SimpleNamespace(
+            log=lambda level, text: logs.append((level, text))))
+        body, headers = legacy('initialize', {**INIT_PARAMS,
+                               'clientInfo': {'name': 'cursor', 'version': VALID_KEY}})
         response = await self.post(body, headers)
         self.assertEqual(response.status, 200)
         session = response.headers['Mcp-Session-Id']
@@ -361,6 +398,20 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
 
         body, headers = legacy('ping', session=session, version='2025-06-18')
         self.assertEqual(json.loads(await (await self.post(body, headers)).text())['result'], {})
+        response = await self.client.delete('/mcp', headers=headers)
+        self.assertEqual(response.status, 405)
+        self.assertEqual((await self.post(body, headers)).status, 200)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(logs[0][0], 2)
+        self.assertIn('client.legacy_established:', logs[0][1])
+        self.assertIn('client=Cursor', logs[0][1])
+        with patch.object(service, 'monotonic', return_value=time.monotonic() + service.SESSION_TTL):
+            self.assertEqual((await self.post(body, headers)).status, 404)
+            self.assertEqual((await self.post(body, headers)).status, 404)
+        self.assertEqual(len(logs), 2)
+        self.assertIn('client.legacy_invalidated: 1 MCP session(s); expired', logs[1][1])
+        self.assertNotIn(session, str(logs))
+        self.assertNotIn(VALID_KEY, str(logs))
 
     async def test_legacy_errors(self):
         body, headers = legacy('initialize', {'capabilities': {}})
@@ -675,8 +726,10 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
                               {'MCP-Protocol-Version': protocol.MODERN_VERSION,
                                'Mcp-Method': 'tools/call',
                                'Mcp-Name': 'reload'})
-        with patch.object(service._Service, '_write', AsyncMock(side_effect=ConnectionResetError)):
+        with patch.object(service._Service, '_write', AsyncMock(side_effect=ConnectionResetError)), \
+                patch.object(svc, '_observe_client') as observe:
             self.assertIsNone(await svc.handle(request))
+        observe.assert_not_called()
         self.assertFalse(fired.is_set())
         svc.pool.close()
 

@@ -21,9 +21,9 @@ _pending = None
 _lock = threading.Lock()
 
 
-def _log(proc, message):
+def _log(proc, message, level=3):
     try:
-        proc.log(3, '[OlivOSCockpit] ' + message)
+        proc.log(level, '[OlivOSCockpit] ' + message)
     except BaseException:
         pass
 
@@ -60,20 +60,20 @@ def _teardown(proc, managers, contexts):
 
     每步独立兜底，某一步失败不阻止其他步骤；清引用不代表线程已结束。
     """
-    def attempt(action):
+    def attempt(action, stage):
         try:
             action()
         except BaseException:
-            _log(proc, 'Shutdown cleanup failed safely.')
+            _log(proc, 'host.cleanup_failed: Could not ' + stage + '.', 4)
 
     for manager in managers:
-        attempt(manager.stop)
-    attempt(service.request_stop)
+        attempt(manager.stop, 'stop configuration supervision')
+    attempt(service.request_stop, 'stop the MCP service')
     for context in contexts:
-        attempt(lambda: raw.uninstall(context))
+        attempt(lambda: raw.uninstall(context), 'uninstall the raw event observer')
         detach = getattr(registry, 'detach', None)
         if callable(detach):
-            attempt(lambda: detach(context))
+            attempt(lambda: detach(context), 'detach inbound interception rules')
 
 
 def _mode():
@@ -113,11 +113,11 @@ def _install_raw(context):
         try:
             attach(context)
         except BaseException:
-            _log(context.proc, 'Instance interception hooks unavailable.')
+            _log(context.proc, 'host.interception_unavailable: Could not attach inbound interception hooks.')
     try:
         raw.install(context, policy=_raw_policy(context))
     except BaseException:
-        _log(context.proc, 'Raw event observer unavailable; read-only tools remain available.')
+        _log(context.proc, 'host.raw_observer_unavailable: Could not attach the raw event observer; other tools remain available.')
 
 
 def _current(context, manager):
@@ -133,7 +133,7 @@ def _terminal_tick(context, manager):
     try:
         terminal.tick(context)
     except BaseException:
-        _log(context.proc, 'Terminal tick failed safely.')
+        _log(context.proc, 'host.terminal_check_failed: Could not refresh debug terminal selection.')
 
 
 def _can_start():
@@ -162,15 +162,12 @@ def _retry_start(context, manager):
     try:
         snapshot = manager.peek_snapshot()
         result = service.apply_config(context, manager, snapshot, tools=registry.TOOLS)
-        if result is False:
-            if getattr(service, 'web', None) is not None and not _can_start():
-                with _lock:
-                    if _current(context, manager) and not _stopped(manager) and _pending is None:
-                        _pending = pending
-            else:
-                _log(context.proc, 'Service start deferred; check host HTTP dependencies.')
+        if result is False and service.web is not None and not _can_start():
+            with _lock:
+                if _current(context, manager) and not _stopped(manager) and _pending is None:
+                    _pending = pending
     except BaseException:
-        _log(context.proc, 'Service start could not be retried safely.')
+        _log(context.proc, 'service.retry_failed: Unexpected error while retrying MCP startup.', 4)
 
 
 def _tool_tick(context, manager):
@@ -182,7 +179,7 @@ def _tool_tick(context, manager):
         try:
             tick(context)
         except BaseException:
-            _log(context.proc, 'Tool staging cleanup failed safely.')
+            _log(context.proc, 'host.staging_cleanup_failed: Could not clear expired or revoked tool staging.', 4)
 
 
 def _tick(context, manager):
@@ -192,7 +189,7 @@ def _tick(context, manager):
     try:
         _retry_start(context, manager)
     except BaseException:
-        _log(context.proc, 'Service handover retry failed safely.')
+        _log(context.proc, 'service.handover_failed: Unexpected error while handing over the MCP service.', 4)
 
 
 def _supervise(context, manager):
@@ -204,7 +201,7 @@ def _supervise(context, manager):
             try:
                 manager.run_forever()
             except BaseException:
-                _log(context.proc, 'Configuration monitor failed safely.')
+                _log(context.proc, 'config.monitor_failed: The configuration supervision loop stopped unexpectedly.', 4)
             # 在 init_after 写 _target 的同一把锁内判定退出：
             # 先读目标再抢锁会让"判活后线程退出"的交接丢失。
             with _lock:
@@ -216,12 +213,16 @@ def _supervise(context, manager):
                     return
             context, manager = target
     except BaseException:
-        _log(context.proc, 'Configuration supervision could not continue safely.')
+        _log(context.proc, 'config.supervision_failed: Could not continue configuration supervision.', 4)
 
 
 def _bind(context, manager):
     """把监督回调接到给定 manager；回调内部另有归属门。"""
-    manager.set_log(lambda message: _log(context.proc, message))
+    def log(message, level=3):
+        if _current(context, manager) and not _stopped(manager):
+            _log(context.proc, message, level)
+
+    manager.set_log(log)
     manager.set_notify(lambda snapshot: _on_config(context, manager, snapshot))
     set_tick = getattr(manager, 'set_tick', None)
     if callable(set_tick):
@@ -244,16 +245,13 @@ def _on_config(context, manager, snapshot):
     try:
         result = service.apply_config(context, manager, snapshot, tools=registry.TOOLS)
     except BaseException:
-        _log(context.proc, 'Configuration change could not be applied safely.')
+        _log(context.proc, 'service.config_callback_failed: Unexpected error applying a configuration update.', 4)
         return
-    if result is False:
-        # 无 HTTP 依赖不是暂态；只有旧实例占位才登记一次性接替。
-        if getattr(service, 'web', None) is not None and not _can_start():
-            with _lock:
-                if _current(context, manager) and not _stopped(manager):
-                    _pending = (context, manager)
-        else:
-            _log(context.proc, 'Service unavailable; check host HTTP dependencies.')
+    # 无 HTTP 依赖不是暂态；只有旧实例占位才登记一次性接替。
+    if result is False and service.web is not None and not _can_start():
+        with _lock:
+            if _current(context, manager) and not _stopped(manager):
+                _pending = (context, manager)
 
 
 def _apply_context(proc, context, manager):
@@ -264,8 +262,10 @@ def _apply_context(proc, context, manager):
     except BaseException:
         context.terminal.update(checked=True, error='Debug terminal preparation failed')
     _install_raw(context)
+    if service.web is None:
+        _log(proc, 'service.dependency_unavailable: Could not import aiohttp; MCP will not listen.', 4)
     if context.terminal.get('error'):
-        _log(proc, 'Debug terminal unavailable; read-only tools remain available.')
+        _log(proc, 'host.terminal_unavailable: Check that an enabled terminal_link / terminal / default account is configured.')
     with _lock:
         _context = context
         _manager = manager
@@ -306,14 +306,14 @@ class Event:
                                             error='Debug terminal preparation failed')
                 _install_raw(context)
                 if context.terminal.get('error'):
-                    _log(Proc, 'Debug terminal unavailable; read-only tools remain available.')
+                    _log(Proc, 'host.terminal_unavailable: Check that an enabled terminal_link / terminal / default account is configured.')
             else:
                 # 旧 manager 必须停止，旧的监督循环才可能返回并接替新目标。
                 if previous_manager is not None and not _stopped(previous_manager):
                     try:
                         previous_manager.stop()
                     except BaseException:
-                        _log(Proc, 'Previous configuration monitor could not be stopped.')
+                        _log(Proc, 'config.stop_failed: Could not stop the previous configuration supervisor.', 4)
                 manager = config.ConfigManager(data_root, _mode())
                 manager.prepare()
                 _apply_context(Proc, Context(Proc, root, data_root, OlivOS,
@@ -332,7 +332,7 @@ class Event:
                 # 清引用不代表线程已结束：活监督器由自身按身份释放归属。
                 if previous_thread is None or not previous_thread.is_alive():
                     _thread = None
-            _log(Proc, 'Host context unavailable.')
+            _log(Proc, 'host.context_unavailable: Could not prepare the host context; check the working directory and plugin data path.', 4)
 
     def init_after(plugin_event, Proc):
         global _thread, _manager, _target
@@ -355,7 +355,7 @@ class Event:
                 )
                 _thread.start()
         except BaseException:
-            _log(Proc, 'Could not start service thread.')
+            _log(Proc, 'config.thread_start_failed: Could not start the configuration supervisor thread.', 4)
 
     def save(plugin_event, Proc):
         # 每步独立兜底；观察器先于内部拦截器还原，某步失败不妨碍后续清理。

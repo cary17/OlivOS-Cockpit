@@ -8,6 +8,7 @@ import inspect
 import queue
 import secrets
 import threading
+from collections import deque
 from dataclasses import dataclass, field, replace
 from time import monotonic
 
@@ -40,25 +41,62 @@ _MISSING = object()
 PORT_FALLBACK_ATTEMPTS = 32
 FALLBACK_MIN_PORT = 1024
 PERSIST_TIMEOUT = 10.0
+_CLIENT_WINDOW = 300.0
+_CLIENT_LOG_LIMIT = 12  # rolling one-minute cap across both protocol eras
+_CLIENT_PRODUCTS = {
+    'claude': 'Claude', 'claude-ai': 'Claude', 'claude code': 'Claude Code',
+    'claude-code': 'Claude Code', 'codex': 'Codex', 'openai-codex': 'Codex',
+    'codex-mcp-client': 'Codex', 'cursor': 'Cursor', 'vscode': 'VS Code',
+    'visual studio code': 'VS Code', 'gemini-cli': 'Gemini CLI',
+    'mcp-inspector': 'MCP Inspector',
+}
+
+
+def _client_product(req, headers):
+    info = (req.params['_meta'].get(protocol.META_CLIENT, {}) if req.modern
+            else req.params['clientInfo'])
+    name = info.get('name', '')
+    product = _CLIENT_PRODUCTS.get(name.lower()) if len(name) <= 64 else None
+    if product is not None:
+        return product
+    agent = headers.get('User-Agent', '')[:64].split('/', 1)[0].split(' ', 1)[0]
+    return _CLIENT_PRODUCTS.get(agent.lower(), 'unknown')
+
+
+def _host_log(context, message, level):
+    try:
+        context.proc.log(level, '[OlivOSCockpit] ' + message)
+    except BaseException:
+        pass
 
 
 class _Sessions:
     """仅内存会话；先清过期，再淘汰最旧。owner 为 token 摘要，轮换即失效。"""
 
-    def __init__(self):
+    def __init__(self, on_end=None):
         self._items = {}
         self._lock = threading.Lock()
+        self._on_end = on_end
+
+    def _ended(self, reason, count):
+        if count and self._on_end is not None:
+            self._on_end('client.legacy_invalidated: %d MCP session(s); %s.' % (count, reason))
 
     def create(self, version=protocol.DEFAULT_LEGACY, owner=''):
         with self._lock:
             now = monotonic()
-            for key in [key for key, value in self._items.items() if value[0] <= now]:
+            expired = [key for key, value in self._items.items() if value[0] <= now]
+            for key in expired:
                 del self._items[key]
+            evicted = 0
             while len(self._items) >= MAX_SESSIONS:
                 self._items.pop(next(iter(self._items)))
+                evicted += 1
             session = secrets.token_urlsafe(32)
             self._items[session] = (now + SESSION_TTL, version, owner)
-            return session
+        self._ended('expired', len(expired))
+        self._ended('capacity eviction', evicted)
+        return session
 
     def version(self, session, owner=None):
         """单锁内返回有效会话的协商版本；无效返回 None。
@@ -70,20 +108,21 @@ class _Sessions:
             value = self._items.get(session)
             if value is None:
                 return None
-            if value[0] <= monotonic():
-                del self._items[session]
-                return None
-            # token 轮换后旧会话按未知会话处理，客户端重新 initialize。
-            if owner is not None and value[2] != owner:
-                return None
-            return value[1]
+            if value[0] > monotonic():
+                # token 轮换后旧会话按未知会话处理，客户端重新 initialize。
+                return value[1] if owner is None or value[2] == owner else None
+            del self._items[session]
+        self._ended('expired', 1)
+        return None
 
     def valid(self, session, owner=None):
         return self.version(session, owner) is not None
 
-    def clear(self):
+    def clear(self, reason='service stopped'):
         with self._lock:
+            count = len(self._items)
             self._items.clear()
+        self._ended(reason, count)
 
 
 @dataclass
@@ -394,7 +433,9 @@ class _Service:
         self.tools = tuple(tools)
         self.by_name = {tool.name: tool for tool in self.tools}
         self.timeout = timeout
-        self.sessions = _Sessions()
+        self.sessions = _Sessions(self._log_client)
+        self._modern_seen = {}
+        self._client_log_times = deque()
         self.manager = manager
         self.pool = _Pool(context)
         self.http_slots = threading.BoundedSemaphore(MAX_CALLS)
@@ -471,14 +512,31 @@ class _Service:
     # ---- 监听与重绑 -----------------------------------------------------
 
     def _log(self, message, level=3):
-        # 上游 diagnoseAPI：2=INFO、3=WARN；仅绑定成功路径显式传 INFO。
-        proc = getattr(getattr(self, 'context', None), 'proc', None)
-        if proc is None:
+        _host_log(self.context, message, level)
+
+    def _log_client(self, message):
+        # 仅私有 HTTP loop 使用；队列长度由滚动预算限制。
+        now = monotonic()
+        times = self._client_log_times
+        while times and now - times[0] >= 60.0:
+            times.popleft()
+        if len(times) < _CLIENT_LOG_LIMIT:
+            times.append(now)
+            self._log(message, 2)
+
+    def _observe_client(self, req, headers):
+        product = _client_product(req, headers)
+        if not req.modern:
+            self._log_client('client.legacy_established: MCP session established; client=%s; version=%s.'
+                             % (product, req.version))
             return
-        try:
-            proc.log(level, '[OlivOSCockpit] ' + message)
-        except BaseException:
-            pass
+        # shortcut: same product shares a label; separate instances need a protocol-level identity.
+        now = monotonic()
+        prior = self._modern_seen.get(product)
+        self._modern_seen[product] = now  # keys come from the fixed product allowlist or unknown
+        if prior is None or now - prior >= _CLIENT_WINDOW:
+            self._log_client('client.modern_activity: MCP client activity observed; client=%s; version=%s.'
+                             % (product, req.version))
 
     def close(self):
         if not self._closed:
@@ -553,7 +611,7 @@ class _Service:
             if not _ready(snapshot):
                 # valid 但无 key 或快照失效：停止监听并清空旧会话，不匿名放行。
                 await self._stop_site()
-                self.sessions.clear()
+                self.sessions.clear('configuration no longer ready')
                 return
             host_name = _value(snapshot, ('listen_host',), None)
             port = _value(snapshot, ('listen_port',), None)
@@ -561,7 +619,7 @@ class _Service:
                     or type(port) is not int or not 1 <= port <= 65535):
                 # 地址/端口非法是配置错误，不触发端口回退。
                 await self._stop_site()
-                self._log('Service configuration rejected; not listening.')
+                self._log('service.invalid_endpoint: Invalid listen_host or listen_port; MCP is not listening.')
                 return
             if self.site is not None and self.bound == (host_name, port):
                 return
@@ -574,7 +632,7 @@ class _Service:
         except asyncio.CancelledError:
             raise
         except BaseException:
-            self._log('Service configuration could not be applied safely.')
+            self._log('service.reconcile_failed: Unexpected error applying the listener configuration.', 4)
 
     async def _start_site(self, manager, snapshot, host_name, configured):
         """配置端口优先；仅 EADDRINUSE 时有界尝试后续端口。"""
@@ -596,7 +654,16 @@ class _Service:
                 await self._close_site(site)
                 if not _address_in_use(exc):
                     self._serving = True
-                    self._log('Service could not listen on the configured address.')
+                    if isinstance(exc, OSError):
+                        code = getattr(exc, 'winerror', None) or exc.errno
+                        if code in (errno.EACCES, errno.EPERM, 10013):
+                            self._log('service.bind_permission: Permission denied binding the MCP endpoint; check host permissions.')
+                        elif code in (errno.EADDRNOTAVAIL, 10049):
+                            self._log('service.bind_address: listen_host is unavailable; check the local addresses.')
+                        else:
+                            self._log('service.bind_os_error: The operating system could not bind the MCP endpoint.', 4)
+                    else:
+                        self._log('service.bind_failed: Unexpected error starting the MCP listener.', 4)
                     return
                 continue
             ports = _listener_ports(self.runner)
@@ -604,7 +671,7 @@ class _Service:
                 # IPv4/IPv6 必须同端口；异常结果按失败关闭处理。
                 await self._close_site(site)
                 self._serving = True
-                self._log('Service listener did not bind a consistent port.')
+                self._log('service.bind_inconsistent: Listener addresses did not bind the same port.', 4)
                 return
             self.site = site
             self.bound = None
@@ -627,10 +694,10 @@ class _Service:
                 self._log('Service listening on %s:%d.' % (host_name, port), 2)
                 return
             await self._stop_site()
-            self._log('Service could not confirm an available listening port.')
+            self._log('service.port_unconfirmed: Could not confirm port write-back; candidate listener closed.')
             return
         self._serving = True
-        self._log('Service could not find an available port near the configured one.')
+        self._log('service.ports_exhausted: Configured and fallback ports are in use; check listen_port.')
 
     async def _confirm_fallback(self, manager, snapshot, port):
         """持有候选端口，等待配置管理器写回并在第二次观测后发布。"""
@@ -693,6 +760,7 @@ class _Service:
     async def _handle(self, request):
         ident = None
         modern = False
+        req = None
         task = None
         consumed = False
         rejected = None
@@ -715,8 +783,8 @@ class _Service:
                 params = message.get('params')
                 meta = params.get('_meta') if type(params) is dict else None
                 modern = type(meta) is dict and protocol.has_modern_meta(meta)
-                reply, task = await self._dispatch(protocol.classify(
-                    message, self._headers(request)), policy)
+                req = protocol.classify(message, self._headers(request))
+                reply, task = await self._dispatch(req, policy)
         except protocol.Reject as exc:
             # 未读完请求体就拒绝时必须关闭连接，避免残留 payload 污染复用连接。
             rejected = exc
@@ -761,6 +829,14 @@ class _Service:
         finally:
             if task is not None:
                 task.release.set()
+        if (response is not None and req is not None and reply.status == 200
+                and not reply.failed and (req.modern or req.method == 'initialize')):
+            try:
+                self._observe_client(req, request.headers)
+            except asyncio.CancelledError:
+                raise
+            except BaseException:
+                pass
         return response
 
     def _auth(self, request, policy):
@@ -1071,6 +1147,7 @@ def _build_app(service):
 
     async def cleanup(_app):
         service.close()
+        service.sessions.clear()
 
     app.on_cleanup.append(cleanup)
     service.app = app
@@ -1202,7 +1279,7 @@ def start_managed(context, manager, tools=TOOLS):
 def apply_config(context, manager, snapshot=None, tools=TOOLS):
     """配置监督线程调用：按最新快照启动或重绑；不阻塞、不重建线程池。
 
-    返回 False 表示 service 模块本身无可用路径（缺 aiohttp 等），由 main 决定记录。
+    返回 False 表示依赖不可用、启动失败或启动位暂未释放。
     """
     global _ACTIVE
     if web is None:
@@ -1235,6 +1312,7 @@ def apply_config(context, manager, snapshot=None, tools=TOOLS):
             name='OlivOSCockpit-service', daemon=True,
         ).start()
     except BaseException:
+        _host_log(context, 'service.thread_start_failed: Could not start the MCP service thread.', 4)
         return False
     # 只等初始化完成，不等待服务结束；超时也不阻塞监督线程。
     started.wait(5)
@@ -1253,14 +1331,16 @@ def _start_managed_thread(context, manager, tools, started):
         if instance is None:
             return
     except BaseException:
-        # 线程顶层兜底；不记录第三方原始异常。
+        _host_log(context, 'service.setup_failed: Could not construct the managed MCP service.', 4)
         return
     finally:
         started.set()
     try:
         _run_loop(instance)
+    except asyncio.CancelledError:
+        pass  # cancellation has reached the top of the private loop
     except BaseException:
-        pass
+        _host_log(context, 'service.loop_failed: The MCP event loop stopped unexpectedly.', 4)
     finally:
         _retire(instance)
 

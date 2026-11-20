@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -359,6 +360,9 @@ class ConfigServiceTests(unittest.IsolatedAsyncioTestCase):
 
         manager = Manager()
         svc = make_service(manager, ())
+        logs = []
+        svc.context = replace(svc.context, proc=SimpleNamespace(
+            log=lambda level, text: logs.append((level, text))))
         svc.runner = object()
         pool = svc.pool
         try:
@@ -370,11 +374,17 @@ class ConfigServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(sites[-2].stopped)
                 self.assertEqual(sites[-1].port, 9000)
                 session = svc.sessions.create()
+                svc.sessions.create()
                 manager.values['api_key'] = ''
+                await svc._reconcile()
                 await svc._reconcile()
                 self.assertTrue(sites[-1].stopped)
                 self.assertFalse(svc.sessions.valid(session))
                 self.assertIs(svc.pool, pool)
+                self.assertEqual([(level, text) for level, text in logs
+                                  if 'client.legacy_invalidated:' in text], [
+                    (2, '[OlivOSCockpit] client.legacy_invalidated: 2 MCP session(s); configuration no longer ready.'),
+                ])
         finally:
             svc.close()
 
@@ -1220,8 +1230,20 @@ class ServiceLogSeverityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(logs), 1)
             level, message = logs[0]
             self.assertEqual(level, 3)
-            self.assertEqual(message,
-                             '[OlivOSCockpit] Service could not listen on the configured address.')
+            self.assertIn('service.bind_permission: Permission denied', message)
+        finally:
+            svc.close()
+
+    async def test_unexpected_bind_error_is_safe(self):
+        svc, logs = self.make(PersistManager())
+        site, _ = site_factory(lambda port: RuntimeError('host-secret'))
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                await svc._reconcile()
+            self.assertIsNone(svc.bound)
+            self.assertEqual([level for level, _ in logs], [4])
+            self.assertIn('service.bind_failed:', logs[0][1])
+            self.assertNotIn('host-secret', logs[0][1])
         finally:
             svc.close()
 
