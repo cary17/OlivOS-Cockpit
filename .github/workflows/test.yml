@@ -2,7 +2,7 @@ name: Cross-platform tests
 
 on:
   push:
-  pull_request:
+    branches: [testing]
 
 permissions:
   contents: read

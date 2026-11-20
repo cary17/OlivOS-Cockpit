@@ -636,41 +636,36 @@ gh api "repos/OlivOS-Team/OlivOS/commits/$upstream_tag" --jq '{sha, html_url}'
 改生命周期          main.py → config.py → service.py → test_entry / test_config_service / test_service_core
 ```
 
-### 8.2 定点与全量命令
+### 8.2 本地定点检查与 CI 全量
 
-在具备宿主发行依赖（含 `aiohttp`）的 Python 3.11 环境从仓库根目录执行。`.github/workflows/test.yml` 在 Linux x64/ARM64、Windows x86/x64/ARM64 与 macOS x64/ARM64 上运行完整测试、临时目录 Full/Lite/skill 构建及 Lite 剔除核对；它只读仓库，不发布归档。CI 的通过结果不替代真实 OlivOS 宿主、目标发行包或容器验收。
+本地只做低配置快速定点检查：用现成可用的 Python 3.11 从仓库根目录按 §8.1 触达清单选对应的 `test_*.py` 运行，不为每个条目跑整套，也不要求本地跑全量，不要求先装齐宿主运行时或容器依赖；HTTP 集成测试依赖 `aiohttp`，缺失时本机跳过。
 
 ```bash
-# 定点回归（按改动文件选择，不为每个条目跑整套）
-python -m unittest discover -s tests -p 'test_entry.py'
-python -m unittest discover -s tests -p 'test_config_service.py'
+# 定点回归（按改动文件选择）
 python -m unittest discover -s tests -p 'test_service_core.py'
-
-# 全量
-python -m unittest discover -s tests
-
-# 构建（新输出目录，避免覆盖现有产物）
-output="$(mktemp -d /tmp/olivos-cockpit-build.XXXXXX)"
-python scripts/build_opk.py --output "$output"
 ```
+
+全量验证由 CI 承担：`.github/workflows/test.yml` 只在 push 到永久分支 `testing` 时运行完整测试、临时目录 Full/Lite/skill 构建及 Lite 剔除核对，矩阵为 Linux x64/ARM64、Windows x86/x64/ARM64 与 macOS x64/ARM64 七个平台；不设 pull_request 或 main 触发，日常合入 main 不触发 CI。工作流只读仓库，不发布归档；CI 通过结果不替代真实 OlivOS 宿主、目标发行包或容器验收。
+
+手动合入 main：把 `testing` 上已通过 CI 的同一 commit 用 fast-forward（`--ff-only`）推进到 main，不 squash；若 main 与 `testing` 已分叉，先把 main 合入 `testing` 并等 CI 重新通过，再推进该新 SHA。`testing` 为永久分支，不删除。
 
 可选：`OLIVOS_COCKPIT_UPSTREAM_SOURCE` 指向核实的固定 Release 源码后运行上游 AST 签名检查（只解析签名，不等于运行验收）；`OLIVOS_COCKPIT_TEST_REAL_LOADER=1` 在隔离环境启用真实加载器测试，不能在生产宿主上执行。必须记录实际通过/失败/跳过数，不把 OK/skipped 写成全部验收通过。
 
 ### 8.3 新增工具的完整层清单
 
-handler（模块内，含权限/只读元数据）→ ToolSpec（schema、required_permission、read_only）→ 加入对应 TOOLS 元组 → registry.TOOLS（Full）与 Lite 剔除判断（`profiles/lite_registry.py` 不含写模块；Lite 可用的共享工具单独确认）→ 测试（单元 + HTTP + 必要时真实加载器）→ interfaces.json tool_bindings（handler、首行号、权限、profile、测试映射）→ docs/reference.md 行为细节 + skill 功能路由与使用指引（涉及安装/配置时同步 README）→ 全量测试与构建核对计数与排序。
+handler（模块内，含权限/只读元数据）→ ToolSpec（schema、required_permission、read_only）→ 加入对应 TOOLS 元组 → registry.TOOLS（Full）与 Lite 剔除判断（`profiles/lite_registry.py` 不含写模块；Lite 可用的共享工具单独确认）→ 定点测试（单元 + HTTP + 必要时真实加载器，见 §8.2）→ interfaces.json tool_bindings（handler、首行号、权限、profile、测试映射）→ docs/reference.md 行为细节 + skill 功能路由与使用指引（涉及安装/配置时同步 README）→ push 到 `testing` 由 CI 全量核对计数与排序。
 
 ### 8.4 常见陷阱
 
 - 在 helper 前插行、改模块 docstring 会移动 handler 首行：同步 tool_bindings 的 `handler_line`（`test_inventory.py` 会拦住），但不要重写上游静态审阅区。
-- 无 aiohttp 的本机测试会跳过 HTTP 集成；提交前在容器或 venv 里跑全量。
+- 无 aiohttp 的本机环境会跳过 HTTP 集成测试；七平台全量由 CI 在 `testing` 承担，本地只做定点检查。
 - 无 manager 的服务 `_policy().generation` 为 `None`，测试注入代次变化时按 `0` 起步，不要直接 `+1`。
 - 同步宿主回调边界与服务私有 loop 的取消语义不同（§2.1）；不要在 BaseException 前统一加取消透传。
 - 写工具的报告口径：超时/失败不承诺"没有副作用"，提交后核验失败明确"可能已替换"。
 
 ### 8.5 人工发布与版本同步
 
-`.github/workflows/release.yml` 仅允许 `workflow_dispatch`；待发布源码放到 GitHub 的 main 后，在 **Actions → Release → Run workflow** 选择 main 并人工运行；发布版本由工作流从 `OlivOSCockpit/app.json` 读取并校验，不再接受人工输入版本。不添加 push、tag、release 或定时发版触发器。`scripts/build_opk.py` 复用同一打包入口生成 Full/Lite OPK 与完整 skill ZIP，只有这三个附件；构建输出用临时目录，不把归档、dist 或缓存提交到仓库，也不捆绑宿主或其他插件。
+`.github/workflows/release.yml` 仅允许 `workflow_dispatch`；待发布源码放到 GitHub 的 main 后，在 **Actions → Release → Run workflow** 选择 main 并人工运行。日常合入 main 不触发任何自动测试；Release 工作流在打包前自行运行全量测试，测试失败即中止发布。发布版本由工作流从 `OlivOSCockpit/app.json` 读取并校验，不再接受人工输入版本。不添加 push、tag、release 或定时发版触发器。`scripts/build_opk.py` 复用同一打包入口生成 Full/Lite OPK 与完整 skill ZIP，只有这三个附件；构建输出用临时目录，不把归档、dist 或缓存提交到仓库，也不捆绑宿主或其他插件。
 
 本项目代码与配套 skill 采用 `AGPL-3.0-or-later`，根 `LICENSE` 为完整许可证文本；两个 OPK 的 `LICENSE` 与 skill ZIP 的 `olivos-cockpit/LICENSE` 必须携带同一副本。README 首次提及 OlivOS 时链接上游以声明来源；第三方项目及素材仍遵循各自许可。
 
