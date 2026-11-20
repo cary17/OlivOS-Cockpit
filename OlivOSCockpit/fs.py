@@ -5,6 +5,7 @@ import io
 import os
 import stat
 import struct
+import sys
 import unicodedata
 import zipfile
 
@@ -653,6 +654,59 @@ def read_fd(fd, limit=MAX_FILE):
 def _revision(info):
     return (info.st_dev, info.st_ino, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _linux_mount_id(fd):
+    # st_dev 相同也可能是 bind mount；只读内核为已打开 fd 生成的有界元数据。
+    try:
+        with open(f'/proc/self/fdinfo/{_raw(fd)}', 'rb') as info:
+            data = info.read(4097)
+    except OSError:
+        raise ToolError('File mount identity is unavailable') from None
+    if len(data) <= 4096:
+        for line in data.splitlines():
+            if line.startswith(b'mnt_id:'):
+                mount = line[len(b'mnt_id:'):].strip()
+                if mount.isdigit():
+                    return mount
+    raise ToolError('File mount identity is unavailable')
+
+
+def require_same_mount(parent, child):
+    if (fstat(parent).st_dev != fstat(child).st_dev
+            or (sys.platform == 'linux' and _linux_mount_id(parent) != _linux_mount_id(child))):
+        raise ToolError('Removal cannot cross a mount boundary')
+
+
+def remove_checked(dir_fd, name, expected, *, directory=False):
+    """仅删已核对的普通单链接文件或空目录；POSIX 名字删除不是跨进程 CAS。"""
+    _component(name)
+    authorize_rel(dir_fd, name, write=True)
+
+    def verify(current):
+        if directory:
+            matches = (stat.S_ISDIR(current.st_mode)
+                       and (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino))
+        else:
+            matches = (stat.S_ISREG(current.st_mode) and current.st_nlink == 1
+                       and _revision(current) == _revision(expected))
+        if not matches or current.st_dev != fstat(dir_fd).st_dev:
+            raise ToolError('Removal target changed or is not accessible')
+
+    if _WINDOWS:
+        # 对最终复核的同一个句柄标记删除，不重新按名称打开。
+        return _winfs.unlink(name, dir_fd=_raw(dir_fd), directory=directory, verify=verify)
+    remove = os.rmdir if directory else os.unlink
+    if remove not in os.supports_dir_fd:
+        raise ToolError('Secure removal is not supported on this platform')
+    opened, _ = open_rel(dir_fd, name)
+    try:
+        require_same_mount(dir_fd, opened)
+        verify(_check_fd(opened))
+        verify(stat_at(name, dir_fd=dir_fd))
+        remove(name, dir_fd=_raw(dir_fd))
+    finally:
+        close(opened)
 
 
 def read_range(dir_fd, rel, offset, limit=MAX_FILE):

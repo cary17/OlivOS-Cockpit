@@ -28,7 +28,7 @@
       }
     },
     "published_tools": {
-      "full": 62,
+      "full": 63,
       "lite": 35
     }
   },
@@ -80119,6 +80119,22 @@
       "tests": [
         "tests/test_host.py",
         "tests/test_redaction.py"
+      ],
+      "verification": "repository_stub_tests; not_live_platform_verification"
+    },
+    "cockpit_plugin_delete": {
+      "handler": "OlivOSCockpit.plugin_delete.cockpit_plugin_delete",
+      "handler_file": "OlivOSCockpit/plugin_delete.py",
+      "handler_line": 196,
+      "required_permission": "plugin_delete",
+      "read_only": false,
+      "profiles": [
+        "full"
+      ],
+      "tests": [
+        "tests/test_plugin_delete.py",
+        "tests/test_service.py",
+        "tests/test_build.py"
       ],
       "verification": "repository_stub_tests; not_live_platform_verification"
     },

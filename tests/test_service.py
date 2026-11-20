@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from OlivOSCockpit import config, files, protocol, service  # noqa: E402
+from OlivOSCockpit import config, files, plugin_delete, protocol, service  # noqa: E402
 from OlivOSCockpit.contracts import (  # noqa: E402
     CALL_TIMEOUT,
     MAX_RESPONSE,
@@ -707,6 +707,43 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.to_thread(entered.wait, 2)
         self.assertFalse(fired.is_set())
         svc.pool.close()
+
+
+@unittest.skipUnless(web is not None, 'aiohttp unavailable')
+class PluginDeletePermissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_eras_require_the_independent_delete_switch(self):
+        calls = []
+        spec = replace(plugin_delete.TOOLS[0], handler=lambda ctx, args: (
+            calls.append(args), Outcome({'package_removed': True}))[1])
+        snapshot = config.Snapshot(api_key=TOKEN, valid=True, full_real_account_write=True,
+                                   full_plugin_install=True, generation=1)
+        manager = SimpleNamespace(snapshot=lambda: snapshot)
+        svc = service._Service(CONTEXT, None, (spec,), CALL_TIMEOUT, manager)
+        self.addCleanup(svc.close)
+        app = web.Application()
+        app.router.add_route('*', '/mcp', svc.handle)
+        args = {'filename': 'Demo.opk', 'namespace': 'Demo', 'expected_sha256': 'a' * 64}
+        async with TestClient(TestServer(app)) as client:
+            async def post(body, headers):
+                async with client.post('/mcp', data=json.dumps(body), headers=headers) as response:
+                    self.assertEqual(response.status, 200)
+                    return dict(response.headers), (await response.json())['result']
+
+            headers, _ = await post(*legacy('initialize', INIT_PARAMS))
+            requests = (
+                modern('tools/call', {'arguments': args}, tool=spec.name),
+                legacy('tools/call', {'name': spec.name, 'arguments': args},
+                       session=headers['Mcp-Session-Id']),
+            )
+            for body, headers in requests:
+                _, result = await post(body, headers)
+                self.assertTrue(result['isError'])
+            self.assertEqual(calls, [])
+            snapshot = replace(snapshot, full_plugin_delete=True)
+            for body, headers in requests:
+                _, result = await post(body, headers)
+                self.assertFalse(result['isError'])
+            self.assertEqual(calls, [args, args])
 
 
 @unittest.skipUnless(web is not None, 'aiohttp unavailable')

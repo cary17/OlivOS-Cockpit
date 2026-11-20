@@ -65,13 +65,14 @@ with tempfile.TemporaryDirectory() as directory:
     assert ('OlivOSCockpit.full_only' in sys.modules) == (mode == 'full')
     assert ('OlivOSCockpit.adapter_tools' in sys.modules) == (mode == 'full')
     assert ('OlivOSCockpit.plugin_install' in sys.modules) == (mode == 'full')
+    assert ('OlivOSCockpit.plugin_delete' in sys.modules) == (mode == 'full')
     if mode == 'lite':
         assert names & FULL_ONLY == set()
         assert {tool.name for tool in TOOLS if not tool.read_only} == {'cockpit_terminal_input'}
     else:
         assert FULL_ONLY <= names
         assert all(tool.name == 'cockpit_terminal_input' or tool.required_permission in (
-            'real_account_write', 'low_level_access', 'plugin_install')
+            'real_account_write', 'low_level_access', 'plugin_install', 'plugin_delete')
             for tool in TOOLS if not tool.read_only)
     # 保持一个已占用端口，验证真实加载器回退后客户端使用回写的端口。
     blocker = socket.socket()

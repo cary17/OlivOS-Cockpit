@@ -174,14 +174,15 @@ Lite / Full     互斥安装，若共用同一数据根则共享同一组文件
 Full 真实账号读      默认允许；仍受路径、字段白名单与资源上限约束
 Full 真实账号写      默认关闭；发送、重载、插件配置/文件更新与账号存档更新需要 full_real_account_write
 Full 插件安装        默认关闭；需要 full_real_account_write + 独立的 full_plugin_install 同时开启
+Full 插件删除        默认关闭；需要 full_real_account_write + 独立的 full_plugin_delete 同时开启
 Full 底层能力        需要 full_real_account_write + full_low_level_access 同时开启
 Lite 真实账号读      默认关闭；开启 lite_real_account_read 后才允许文件与账号读取
 Lite 写入口          cockpit_terminal_input（虚拟终端输入），不受上述开关约束
 ```
 
-发送、重载、插件配置/配置文件更新和账号存档更新绑定 `real_account_write`；插件安装另需独立的 `full_plugin_install`（缺省 `false`，旧配置缺该字段仍有效），不与底层开关合并。`cockpit_proc_get` 与 `cockpit_intercept_rules` 绑定 `low_level_access`，同时要求 Full 写与底层开关。敏感 handler 内与提交前均复核权限/请求代次，不将 `readOnlyHint` 当授权。`cockpit_terminal_input` 不使用真实写开关，是 Lite 唯一写入口。虚拟终端不是沙箱：被触发插件仍可能写真实文件/数据库、访问网络或产生其他副作用。
+发送、重载、插件配置/配置文件更新和账号存档更新绑定 `real_account_write`；插件安装另需独立的 `full_plugin_install`（缺省 `false`，旧配置缺该字段仍有效），插件删除另需独立的 `full_plugin_delete`（缺省 `false`，旧配置缺该字段仍有效），均不与底层开关合并。`cockpit_proc_get` 与 `cockpit_intercept_rules` 绑定 `low_level_access`，同时要求 Full 写与底层开关。敏感 handler 内与提交前均复核权限/请求代次，不将 `readOnlyHint` 当授权。`cockpit_terminal_input` 不使用真实写开关，是 Lite 唯一写入口。虚拟终端不是沙箱：被触发插件仍可能写真实文件/数据库、访问网络或产生其他副作用。
 
-控制目录、`denied_paths`、OlivOS 运行数据范围之外的路径及宿主源码写入属于最高禁令。普通文件读取限于日志、插件包元数据与其他插件数据 namespace；Full 文件更新另限已有非执行文本配置，账号存档另从磁盘启动配置解析。宿主源码与本插件控制数据始终不可写；普通文件工具也不写插件包。唯一例外是 Full 专用的 `cockpit_plugin_install`：只在宿主插件包根内安装新包或替换**同 namespace** 的现有包，仍拒绝路径外目标、控制数据与 Cockpit 自身包。数据根与插件包根只来自受信任宿主上下文，MCP 请求不能扩根。写入格式、提交后核验与运行生效边界见 [受限写入与入站规则](docs/reference.md#4-受限写入与入站规则)。
+控制目录、`denied_paths`、OlivOS 运行数据范围之外的路径及宿主源码写入属于最高禁令。普通文件读取限于日志、插件包元数据与其他插件数据 namespace；Full 文件更新另限已有非执行文本配置，账号存档另从磁盘启动配置解析。宿主源码与本插件控制数据始终不可写；普通文件工具也不写插件包。Full 专用的两个窄例外是 `cockpit_plugin_install`（安装新包或替换**同 namespace** 的现有包）和 `cockpit_plugin_delete`（删除顶层 OPK，可选清理 `数据根/<清单 namespace>`）。均拒绝路径外目标、控制数据与 Cockpit 自身包。数据根与插件包根只来自受信任宿主上下文，MCP 请求不能扩根。写入格式、提交后核验与运行生效边界见 [受限写入与入站规则](docs/reference.md#4-受限写入与入站规则)。
 
 ### 2.7 出站脱敏
 
@@ -270,6 +271,26 @@ namespace 只允许单个目录名；拒绝绝对路径、"."、".."、路径分
 ```
 
 包格式与客户端边界：官方 OPK 是 ZIP 根部直接放置插件目录内容（`app.json`、`__init__.py`、`main.py` 及 `resources` 等），无外层文件夹，`app.json` 为 UTF-8 无 BOM；已有 `.opk` 保持字节不变。实现复用现有 MCP 上传与标准库 ZIP，不引入通用 HTTP 客户端或新依赖。客户端本地文件读取/打包权限由客户端环境决定，与服务端 MCP 路径无关；从源码打包不得导入或执行被安装源码/构建脚本，并排除本地密钥、VCS、缓存、虚拟环境和构建产物。结构校验不是沙箱：包内代码在后续加载时以宿主进程权限执行，包括自动或外部触发的重启。
+
+**插件删除层（仅 Full）** — `cockpit_plugin_delete` 是包删除的专用窄例外：
+
+```
+权限         full_real_account_write ∧ full_plugin_delete（独立开关，默认 false）
+参数         filename（精确顶层 OPK basename）/ namespace（精确安全清单 namespace）
+             expected_sha256（64 hex，须来自 cockpit_meta(filename=...)）
+             delete_data（布尔；默认仅删包，true 时清除 数据根/<清单 namespace>）
+确认         须明确用户对精确目标与是否擦除数据的确认；expected_sha256 即目标锁定
+预检         有界（合计 ≤512 条目 / 10 层）；先核验包身份再预检数据
+             数据范围仅 数据根/<清单 namespace>；拒绝其他包与宿主源码
+             策略拒绝、链接/hardlink/reparse/mount/特殊文件或无法安全核验时 fail-closed
+顺序         先删包，再尝试删数据；包删除不等于卸载，不自动 reload
+结果         package_removed（true 或 null=未知）；data（kept/not_attempted/
+             absent/removed/partial_or_unknown）；currently_loaded（bool/null）
+             removed 包且结果确定时 requires_loader_restart: true
+失败边界     partial_or_unknown 或包结果未知是明确失败：无回滚、无自动重试、
+             不承诺无副作用；数据缺失不算失败；不提供外部 CAS；仍加载的
+             插件可在数据删除后写回或重建数据
+```
 
 **运行时层** — 需要 `Proc`，仅在加载器进程内可用
 
@@ -395,7 +416,7 @@ TLS 终止              本项目不做；需要时由外部反向代理承担
 - 静态工具表：现代规范要求 `tools/list` 不随连接变化且顺序确定。运行时拿不到某个能力也不从列表删工具，调用返回 `isError: true`；未完成安全绑定的接口只在内部台账登记，二者不可混淆。全部工具名以 `cockpit_` 开头，定义按名称确定性排序。
 - `interfaces.json` 的 candidate 是固定源码审阅分类，不等于公开执行表。只有实际安全绑定进入 `tool_bindings` / registry 的名称对客户端可见；未绑定项不展示、不接受猜名调用，不发布永久失败的候选占位工具。hidden/blocked/internal（进程终止、线程强停、账号保存、消息反射等）只内部分类。
 - `catalog_tools.py` 是历史/审计候选快照，**永不并入运行注册表**，两个构建都不导入。
-- Lite 物理剔除：Lite 归档不含 `full_only.py`、`adapter_tools.py`、`file_write.py`、`account_write.py`、`intercept.py`、`plugin_install.py` 及插件安装实现，不通过运行时开关隐藏 Full 实现；共享的 `cockpit_terminal_input` 是 Lite 唯一非只读工具。`cockpit_plugin_install` 仅 Full，且需 `full_real_account_write` 与独立默认关闭的 `full_plugin_install` 双授权。
+- Lite 物理剔除：Lite 归档不含 `full_only.py`、`adapter_tools.py`、`file_write.py`、`account_write.py`、`intercept.py`、`plugin_install.py`、`plugin_delete.py` 及插件安装/删除实现，不通过运行时开关隐藏 Full 实现；共享的 `cockpit_terminal_input` 是 Lite 唯一非只读工具。`cockpit_plugin_install` 仅 Full，且需 `full_real_account_write` 与独立默认关闭的 `full_plugin_install` 双授权；`cockpit_plugin_delete` 仅 Full，且需 `full_real_account_write` 与独立默认关闭的 `full_plugin_delete` 双授权。
 - 日志与插件数据只在 §3.2 的允许路径和 §2.3 的资源上限内读取，截断必须标记。所有发往客户端的应用值在统一响应构造边界按 §2.7 脱敏，两版同策略、无绕过参数；覆盖工具结果、正文、错误和降级路径。
 - 脱敏仅生成副本，不能改变宿主数据、文件或 SDK 原始参数；工具的文本与结构化结果必须来自同一份干净数据。必须区分应用值与协议信封/schema，保留必要的请求 ID、错误码、会话头及操作句柄。已知凭据只从 `api_key` 和宿主字段白名单有界采集，不反射补搜或记录原值。脱敏失败、超限或编码失败只能返回固定安全错误/截断并禁止 after_send，不得回退原文；CancelledError 继续按 §2.1 传播。
 - 用户选择保留规则脱敏后的正文，而非隐藏全部未知内容。不能把未命中规则等同于无敏感信息：无标签或未知格式的个人信息、业务秘密仍可能漏识别，原始磁盘内容也未被修改。
@@ -553,7 +574,7 @@ bots           无可靠适配器状态时 connection 为 'unknown'，断线账�
                关闭脱敏仍做 JSON/限额校验；未知业务秘密可能漏识别
                原始事件仅覆盖 run_plugin 转换前白名单字段，不宣称流量全覆盖
                异常/超限无原文降级、不执行 after_send
-工具集         Full 62 个、Lite 35 个（以注册表导出为准）；全部以 cockpit_ 开头
+工具集         Full 63 个、Lite 35 个（以注册表导出为准）；全部以 cockpit_ 开头
                Lite 包内与 Full 共用 cockpit_terminal_input，但不含
                full_only / adapter_tools / file_write / account_write / intercept / 安装实现的任何代码
                未安全绑定的 candidate 及 hidden/blocked 只内部登记，不列出且猜名调用失败
@@ -562,6 +583,7 @@ bots           无可靠适配器状态时 connection 为 'unknown'，断线账�
 权限           Full 真实写默认关闭；适配器发送被拒，开启 full_real_account_write 后放行
                low_level 需要 full_real_account_write + full_low_level_access 同时开启
                插件安装需要 full_real_account_write + full_plugin_install 同时开启；Lite 无实现
+               插件删除需要 full_real_account_write + full_plugin_delete 同时开启；Lite 无实现
                Lite 真实账号读默认关闭，开启 lite_real_account_read 后才可读
                cockpit_terminal_input 在 Lite 可用；虚拟终端非沙箱已文档化
 终端账号       运行期与 init 期对宿主账号字典零增删；无合格账号明确停用并可操作
@@ -586,6 +608,11 @@ bots           无可靠适配器状态时 connection 为 'unknown'，断线账�
                ZIP 根部为插件目录内容、无外层文件夹、app.json UTF-8 无 BOM；已有 OPK 保字节
                提交后不自动 reload；单独授权的整加载器 reload 才加载；结构校验非沙箱
                客户端本地打包/路径权限与服务器 MCP 权限分开；不上传本地任意路径、不泄露完整 base64
+插件删除       写∧full_plugin_delete 双授权；Lite 物理不含实现；缺省 false 且旧配置仍有效
+               精确顶层 filename、精确清单 namespace、cockpit_meta 取得的 64 hex expected_sha256
+               数据预检有界（≤512 条目/10 层）且仅限 数据根/<清单 namespace>；fail-closed 边界
+               先删包后删数据；结果区分 package_removed/data 状态；partial_or_unknown 是失败
+               无回滚、无自动重试、无外部 CAS；包删除不卸载、不自动 reload
 文档一致性     README / AGENTS 的工具数与 registry 导出一致，统一使用 cockpit_ 前缀
                任何功能/schema/权限/失败语义变更同步 skill 使用指引与 evaluator 场景
                README 使用固定发布包名（不带版本号），不写死具体发布版本

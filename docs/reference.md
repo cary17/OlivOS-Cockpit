@@ -103,6 +103,18 @@ JSON 另做严格解析与解码前结构预算。不保证目标插件自动重
 
 提交结果不确定（超时、断线、核验失败）时不自动重放 `commit` 或重新上传；先重新读取安装元数据与日志判断实际状态，再取得新的用户授权。
 
+### 插件删除（cockpit_plugin_delete，仅 Full）
+
+`cockpit_plugin_delete` 是包删除的专用窄例外，只删除宿主插件包根内的顶层 `.opk` 包。它需要 `full_real_account_write` 与独立的 `full_plugin_delete` 同时开启；后者默认 `false`，旧配置缺少该字段仍有效。Lite 在构建时物理剔除删除实现。调用前须获得用户对精确目标与是否擦除数据的明确确认。
+
+参数与边界：
+
+- 必填 `filename`（精确顶层 OPK basename）、`namespace`（与该包根 `app.json` 一致的精确安全清单 namespace）与 `expected_sha256`（该包完整 64 位十六进制摘要，必须先用 `cockpit_meta(filename=...)` 取得；它同时把请求锁定到已核实的包内容）。`delete_data` 为布尔，默认 `false` 只删包；`true` 时在数据删除预检通过后一并清除 `数据根/<清单 namespace>`。
+- 数据删除只作用于 `数据根/<清单 namespace>`：预检有界（目录合计 ≤512 条目、深度 ≤10 层）。存在共用 namespace 的其他包或源码插件，或者遇到路径策略拒绝、符号链接、硬链接、reparse point、挂载边界、特殊文件及其他无法确认安全的情况时，预检失败，不删除任何内容。
+- 预检通过后**先删包，再尝试删数据**。包删除不等于卸载：已加载的插件代码仍在内存中，可能在数据删除后继续写回或重建数据；本工具不自动重载。
+- 操作结果区分 `package_removed`（`true`，或 `null` 表示删除结果未知）与 `data`（`kept` / `not_attempted` / `absent` / `removed` / `partial_or_unknown`），并返回 `currently_loaded`（布尔或 `null`）；删除包且结果确定时返回 `requires_loader_restart: true`。数据不存在不是失败。
+- `data: "partial_or_unknown"` 或 `package_removed` 未知是明确失败：不回滚、不自动重试，也不承诺"没有副作用"。与安装相同，服务端不提供跨进程 compare-and-swap，外部写入方由使用者协调。需要移除已加载实例时，`cockpit_reload`（整加载器）或宿主重启是单独授权的动作。
+
 ### 插件配置数据库（cockpit_plugin_config_set）
 
 经宿主现有 `set_config(..., pkl=False)` 写入配置数据库。仅支持无损 SQLite/JSON 标量（null、布尔、63-bit 范围整数、有限浮点和 ≤64 KiB 字符串），不接收列表/字典、SQL、pickle 或文件路径。自身 namespace 永久拒绝，已知数据库路径也必须通过路径策略；该预检不能给宿主内部数据库连接增加目录 fd 级竞态保护。

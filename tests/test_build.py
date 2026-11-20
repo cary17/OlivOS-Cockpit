@@ -30,7 +30,8 @@ class BuildTests(unittest.TestCase):
                     expected.discard('catalog_tools.py')
                     if lite:
                         expected -= {'full_only.py', 'adapter_tools.py', 'file_write.py',
-                                     'account_write.py', 'intercept.py', 'plugin_install.py'}
+                                     'account_write.py', 'intercept.py', 'plugin_install.py',
+                                     'plugin_delete.py'}
                     self.assertTrue(expected <= names, expected - names)
                     self.assertIn('app.json', names)
                     self.assertIn('__init__.py', names)
@@ -49,7 +50,7 @@ class BuildTests(unittest.TestCase):
                     self.assertEqual('full_only.py' in names, not lite)
                     self.assertEqual('adapter_tools.py' in names, not lite)
                     for module in ('file_write.py', 'account_write.py', 'intercept.py',
-                                   'plugin_install.py'):
+                                   'plugin_install.py', 'plugin_delete.py'):
                         self.assertEqual(module in names, not lite)
                     self.assertNotIn('catalog_tools.py', names)
                     for module in ('config.py', 'raw.py', 'read_tools.py', 'account_tools.py'):
@@ -179,7 +180,8 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as clean
     lite = mode == 'lite'
     assert ('OlivOSCockpit.full_only' in sys.modules) == (not lite)
     assert ('OlivOSCockpit.adapter_tools' in sys.modules) == (not lite)
-    for full_module in ('file_write', 'account_write', 'intercept', 'plugin_install'):
+    for full_module in ('file_write', 'account_write', 'intercept', 'plugin_install',
+                        'plugin_delete'):
         assert ('OlivOSCockpit.' + full_module in sys.modules) == (not lite)
     assert 'OlivOSCockpit.catalog_tools' not in sys.modules
     assert {tool.name for tool in read_tools.TOOLS + account_tools.TOOLS} <= names
@@ -191,6 +193,7 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as clean
         assert 'cockpit_plugin_file_update' not in names
         assert 'cockpit_intercept_rules' not in names
         assert 'cockpit_plugin_install' not in names
+        assert 'cockpit_plugin_delete' not in names
         assert not hasattr(module.registry, 'tick')
         assert {tool.name for tool in raw_tools.TOOLS} <= names
     else:
@@ -198,6 +201,7 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as clean
         assert FULL_ONLY <= names
         assert 'cockpit_milky_send_group' in names
         assert 'cockpit_plugin_install' in names
+        assert 'cockpit_plugin_delete' in names
         assert callable(getattr(module.registry, 'tick', None))
     # 运行数据根：模板由 ConfigManager 首次刷新创建，无 key 不监听。
     data_root = str(base / 'plugin' / 'data')

@@ -8,6 +8,7 @@ from .file_write import TOOLS as FILE_WRITE_TOOLS
 from .files import TOOLS as FILE_TOOLS
 from .full_only import TOOLS as FULL_TOOLS
 from .host import TOOLS as HOST_TOOLS
+from .plugin_delete import TOOLS as DELETE_TOOLS
 from .plugin_install import TOOLS as INSTALL_TOOLS
 from .raw_tools import TOOLS as RAW_TOOLS
 from .read_tools import TOOLS as READ_TOOLS
@@ -17,7 +18,7 @@ MODE = 'full'
 TOOLS = tuple(sorted(
     FILE_TOOLS + HOST_TOOLS + FULL_TOOLS + ADAPTER_TOOLS + RAW_TOOLS + TERMINAL_TOOLS
     + READ_TOOLS + FILE_WRITE_TOOLS + ACCOUNT_TOOLS + ACCOUNT_WRITE_TOOLS + intercept.TOOLS
-    + INSTALL_TOOLS,
+    + INSTALL_TOOLS + DELETE_TOOLS,
     key=lambda tool: tool.name,
 ))
 

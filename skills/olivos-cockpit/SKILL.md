@@ -1,6 +1,6 @@
 ---
 name: olivos-cockpit
-description: 通过已连接的 OlivOS Cockpit MCP 工具诊断机器人宿主、账号、插件、日志和事件，读取插件数据，执行已授权的虚拟终端测试、消息发送、受限配置操作与 Full 插件安装/更新。用于使用本插件，不用于开发、构建或修改其源码。
+description: 通过已连接的 OlivOS Cockpit MCP 工具诊断机器人宿主、账号、插件、日志和事件，读取插件数据，执行已授权的虚拟终端测试、消息发送、受限配置操作与 Full 插件安装/更新/删除。用于使用本插件，不用于开发、构建或修改其源码。
 metadata:
   version: v0.4.0
 ---
@@ -31,7 +31,7 @@ metadata:
 
 - 默认只读：先确定目标 namespace、账号和症状，只读取相关的小范围数据。
 - Full 的真实账号读默认允许；真实写默认关闭。Lite 的真实账号读默认关闭，开启本地配置 `lite_real_account_read` 后才允许。`cockpit_terminal_input` 在 Full 和 Lite 都不受 `full_real_account_write` 约束，但仍须配置有效、终端账号已选中并通过调用前复核；Lite 中它是唯一非只读工具。配置键以 `config.json` 实际接受的为准，不编造未知键或引申额外权限。
-- 插件安装只存在于 Full，且需要 `full_real_account_write` 与独立的 `full_plugin_install` 同时开启；后者默认关闭，Lite 物理不含安装实现。缺少工具或授权时停止，不猜名调用，也不建议为通过验证而擅自开启权限。
+- 插件安装与删除只存在于 Full：安装需要 `full_real_account_write` 与独立的 `full_plugin_install` 同时开启；删除需要 `full_real_account_write` 与独立的 `full_plugin_delete` 同时开启。两个开关默认关闭，Lite 物理不含安装/删除实现。缺少工具或授权时停止，不猜名调用，也不建议为通过验证而擅自开启权限。
 - Full-only 工具没有出现在当前工具集中时，就不能在这份安装上调用；不要猜内部候选或隐藏接口。
 - `cockpit_status`、插件元数据和纯 schema 查询可作为初查入口；账号、日志、插件数据和原生账号查询可能需要真实读权限。
 - `cockpit_raw_events` 在 Lite 中于 `lite_real_account_read` 未开启时只保留选中虚拟终端范围内的记录；开启后可观察允许范围内的真实账号事件。空结果不代表全局没有流量。
@@ -48,7 +48,7 @@ metadata:
 | 查看插件数据 | `cockpit_data` 列目录 → 读指定相对路径 → 按返回游标顺序续读 |
 | 文件工具报告平台或路径错误 | 读结构化错误；按现场 schema 查看 `cockpit_status` / `cockpit_host_info` 可提供的环境信息；缺少 OS、Python 3.11 位数或架构信息时请维护者在宿主本地核实。Windows 中未解析的短名拒绝项可能连带拒绝同目录更新；请维护者本地核对 `denied_paths`，停止该路径，不换绝对路径、`..`、链接别名或 shell 绕过 |
 | 模拟用户消息 | 先确认 `debug_terminal.selected` → 用户授权具体测试消息/上下文 → `cockpit_terminal_input` |
-| 发真实消息、改配置/账号、重载、拦截或安装/更新 OPK | 先读现状、明确影响并确认用户授权，再读 [受控操作](references/operations.md) |
+| 发真实消息、改配置/账号、重载、拦截或安装/更新/删除 OPK | 先读现状、明确影响并确认用户授权，再读 [受控操作](references/operations.md) |
 | 判断一次真实消息是否已提交 | 读 [真实账号消息发送的结果边界](references/operations.md#2-真实账号消息发送)；只解读既有结果，不补发 |
 | 查询群、成员、消息或账号类型 | 按 [工具路由与读取](references/tool-guide.md) 选择单个查询，再核对现场 schema |
 
@@ -139,6 +139,16 @@ metadata:
 4. 上传只完成持久化与校验，**不会自动重载或启用插件**。加载需要另外获得用户对 `cockpit_reload`（整加载器，不是单插件热重载）的明确授权，或由使用者安排宿主重启。
 5. 结构校验不是沙箱：包内代码在后续加载时以宿主进程权限运行，包括自动或外部触发的重启。只安装用户确认可信的包。
 
+### 7.1 删除已安装的 OPK（仅 Full）
+
+只有在 Full 实际提供 `cockpit_plugin_delete`、`full_real_account_write` 与 `full_plugin_delete` 均已开启，且用户明确确认精确目标包与是否同时清除数据时才使用。Lite 不含删除实现；普通文件工具也不能删插件包。
+
+1. 先用 `cockpit_meta(filename=...)` 读取目标包元数据，取得该包完整 64 位十六进制 SHA-256 作为 `expected_sha256`；核对包内 `app.json` 的 namespace 与用户目标一致。`filename` 用精确顶层包文件名，`namespace` 用精确清单值，不猜名。
+2. `delete_data` 由用户明确选择：默认 `false` 只删包；`true` 时服务端只在 `数据根/<清单 namespace>` 范围内做有界预检后清除数据，不会触及其他插件或宿主源码。数据不存在不算失败。
+3. 服务端预检遇到策略拒绝、链接/hardlink/reparse point/挂载点/特殊文件，或无法安全确认边界时整体失败，不删除任何内容；不换路径或别名绕过。
+4. 顺序是先删包、再尝试删数据。删除包不等于卸载：已加载的插件代码仍在内存中，可能在数据删除后继续写回数据，也不会自动重载。结果区分 `package_removed`（`true` 或 `null`=结果未知）与 `data`（`kept`/`not_attempted`/`absent`/`removed`/`partial_or_unknown`）；删除包且结果确定时返回 `requires_loader_restart: true`。
+5. `data: "partial_or_unknown"` 或包删除结果未知是明确失败：不回滚、不自动重试，不把任何一层报成已恢复原状。需要移除已加载实例时，另行取得用户对 §6 整加载器 reload 的授权或安排宿主重启。
+
 ## 8. 错误与断线恢复
 
 | 信号 | 下一步 |
@@ -154,6 +164,8 @@ metadata:
 | 安装上传过期/被撤销/被取消 | 候选已关闭；重新 `begin` 并重传，不复用旧句柄或分块；归属/代次变化由监督 tick 清除 |
 | 安装写入被拒 | 其他 owner 的请求不清除持有者上传；同 owner 的 offset/base64/超限错误可能保留上传，按原 offset 续传或同 owner `cancel` 后重新 `begin` |
 | 安装提交结果未知 | 不自动重放 `commit` 或重新上传；先读安装元数据与日志，再取得新授权 |
+| 删除预检失败 | 预检不安全或无法安全核验时整体失败，未删除任何内容；读结构化原因，不换路径、解包、别名或 shell 绕过，与用户重新确认目标 |
+| 删除结果部分/未知（`package_removed` null 或 `data: "partial_or_unknown"`） | 是明确失败：不回滚、不自动重试、不承诺无副作用；先重读元数据、数据目录与日志判断实际状态，再取得新授权 |
 | 连接失败但宿主已运行 | 8767 只是示例；端口可能已回退，读取监听成功日志中的实际绑定端口后更新客户端 URL；可请用户查看本地 `config.json` 的 `listen_port`，不要通过 MCP 读取控制文件 |
 | 重载后失联 | 等服务恢复、重建连接；恢复可连不等于已证明全部插件重载成功 |
 

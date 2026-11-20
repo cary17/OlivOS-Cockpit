@@ -661,10 +661,12 @@ def mkdir(name, mode=0o700, *, dir_fd):
     close(handle)
 
 
-def unlink(name, *, dir_fd):
+def unlink(name, *, dir_fd, directory=False, verify=None):
     handle = _open_relative(name, _DELETE | _READ_ATTRIBUTES | _SYNCHRONIZE,
-                            _FILE_OPEN, False, 0o600, dir_fd)
+                            _FILE_OPEN, directory, 0o600, dir_fd)
     try:
+        if verify is not None:
+            verify(fstat(handle))
         with _borrow(handle) as node:
             # POSIX disposition removes this name while other handles remain open.
             _set_information(node.raw, 64, _U32(0x1 | 0x2))

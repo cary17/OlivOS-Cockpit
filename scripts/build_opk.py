@@ -120,7 +120,7 @@ def build(output, root=None):
             files['full_only.py'] = (source / 'full_only.py').read_bytes()
             files['adapter_tools.py'] = (source / 'adapter_tools.py').read_bytes()
             for module in ('intercept.py', 'file_write.py', 'account_write.py',
-                           'plugin_install.py'):
+                           'plugin_install.py', 'plugin_delete.py'):
                 files[module] = (source / module).read_bytes()
         destination = output / f'{name}.opk'
         _write_archive(destination, files)

@@ -570,7 +570,7 @@ def _scan_dir(dir_fd, depth, filename, namespace, budget):
         if entry['type'] == 'file':
             if not name.endswith('.opk'):
                 continue
-            if name.casefold() == filename.casefold():
+            if depth == 0 and name.casefold() == filename.casefold():
                 if name != filename:
                     raise ToolError('An entry differs only by case from the target filename')
                 continue

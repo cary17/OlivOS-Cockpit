@@ -108,6 +108,7 @@ jobs:
               forbidden = {
                   "full_only.py", "adapter_tools.py", "file_write.py",
                   "account_write.py", "intercept.py", "plugin_install.py",
+                  "plugin_delete.py",
               }
               assert "_winfs.py" in full_names and "_winfs.py" in lite_names
               assert not (forbidden & lite_names), forbidden & lite_names

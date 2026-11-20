@@ -44,6 +44,7 @@ PERMISSION_REAL_ACCOUNT_READ = 'real_account_read'
 PERMISSION_REAL_ACCOUNT_WRITE = 'real_account_write'
 PERMISSION_LOW_LEVEL_ACCESS = 'low_level_access'
 PERMISSION_PLUGIN_INSTALL = 'plugin_install'
+PERMISSION_PLUGIN_DELETE = 'plugin_delete'
 
 _KEY_RE = re.compile(r'OlivOS-[A-Za-z0-9]{32,64}\Z')
 _DIR_FLAGS = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0)
@@ -69,6 +70,7 @@ def config_template():
         'full_low_level_access': False,
         'denied_paths': [],
         'full_plugin_install': False,
+        'full_plugin_delete': False,
     }
 
 
@@ -95,6 +97,7 @@ class Snapshot:
     generation: int = 0
     fingerprint: str | None = None
     full_plugin_install: bool = False
+    full_plugin_delete: bool = False
 
     @property
     def ready(self):
@@ -117,6 +120,10 @@ class Snapshot:
             # 安装插件是新写入能力：Full 且已就绪，并同时具备真实写开关。
             return (mode == MODE_FULL and self.ready and self.full_real_account_write
                     and self.full_plugin_install)
+        if permission == PERMISSION_PLUGIN_DELETE:
+            # 删除插件包不可逆：同安装门控，另需独立的删除开关。
+            return (mode == MODE_FULL and self.ready and self.full_real_account_write
+                    and self.full_plugin_delete)
         return False
 
 
@@ -249,6 +256,7 @@ def _config_values(data):
         'denied_paths': _strings(data, 'denied_paths', MAX_PATH_CHARS, MAX_DENIED_PATHS),
         # 旧配置没有该键时按关闭处理；类型仍须是布尔值。
         'full_plugin_install': _boolean(data, 'full_plugin_install', False),
+        'full_plugin_delete': _boolean(data, 'full_plugin_delete', False),
     }
 
 
@@ -827,7 +835,8 @@ class ConfigManager:
 __all__ = [
     'CONFIG_NAME', 'CONTROL_DIR', 'ConfigError', 'ConfigManager', 'DEFAULT_HOST',
     'DEFAULT_PORT', 'NAMESPACE_DIR', 'PERMISSION_LOW_LEVEL_ACCESS',
-    'PERMISSION_PLUGIN_INSTALL', 'PERMISSION_REAL_ACCOUNT_READ',
+    'PERMISSION_PLUGIN_DELETE', 'PERMISSION_PLUGIN_INSTALL',
+    'PERMISSION_REAL_ACCOUNT_READ',
     'PERMISSION_REAL_ACCOUNT_WRITE', 'REDACTION_NAME', 'Snapshot', 'config_template',
     'control_dir', 'is_protected', 'redaction_template',
 ]

@@ -14,6 +14,7 @@
 | `cockpit_accounts_schema` | 无 | 账号输入 schema，不读取现有凭据 |
 | `cockpit_accounts_validate` | account | 对给定账号配置做校验，不创建账号、不证明能连接；不要求用户把凭据贴到对话 |
 | `cockpit_plugin_install` | `operation`（begin/write/commit/cancel）及各动作字段，以现场 schema 为准 | 仅 Full，需 `full_real_account_write` 与 `full_plugin_install` 双开关；安装/覆盖 OPK；服务端只收 MCP 上传字节，不读客户端本地路径；不自动重载 |
+| `cockpit_plugin_delete` | `filename`、`namespace`、`expected_sha256`；可选 `delete_data` | 仅 Full，需 `full_real_account_write` 与 `full_plugin_delete` 双开关；删除插件包根内的顶层 OPK；`expected_sha256` 须来自 `cockpit_meta(filename=...)`；包删除不等于卸载，不自动重载 |
 
 示例（目标 namespace 须来自实际安装清单）：
 
@@ -100,3 +101,13 @@ schema 校验通过不等于适配器查询成功；原生查询返回 unsupport
 - 同 namespace 覆盖是允许的正常操作，不需要旧包 SHA-256、旧修订门槛或 force 开关；旧包可能丢失，外部写入方由用户协调。
 - 已有 `.opk` 保持字节；从源码打包时 ZIP 根部直接放插件目录内容，无外层文件夹，`app.json` UTF-8 无 BOM，排除密钥/VCS/缓存/虚拟环境/构建产物，不执行被安装源码或构建脚本。
 - `commit` 的 `sha256` 必须是本次新完整包的摘要，供服务端校验上传字节与最终落盘内容；不匹配拒绝，成功结果返回同一值供核验。它是新包要求，不是旧包前提；同 namespace 覆盖不需要旧包 SHA-256、旧修订门槛或 force。结果未知不要重放。安装成功不代表已加载：`cockpit_reload` 是单独授权的整加载器动作，不是单插件热重载。结构校验不是沙箱。
+
+## 6. 插件删除（仅 Full）
+
+`cockpit_plugin_delete` 需要 `full_real_account_write` 与独立的 `full_plugin_delete` 同时开启；Lite 物理不含该工具。先取得用户对精确目标与是否清除数据的确认，再按现场 schema 调用：
+
+1. `cockpit_meta(filename=...)` 读取目标包，用返回的完整 64 位十六进制摘要作 `expected_sha256`；核对包内 `app.json` 的 namespace 与目标一致后才提交 `filename`/`namespace`。
+2. `delete_data` 只在用户明确要求时传 `true`；服务端只在 `数据根/<清单 namespace>` 内做有界预检后清除，不触及其他插件数据或宿主源码。数据不存在不算失败。
+3. 预检不安全（策略拒绝、链接/hardlink/reparse point/挂载点/特殊文件、无法安全核验）时整体失败，不删除；不换路径、解包或别名绕过。
+4. 先删包再尝试删数据；包删除不等于卸载，已加载插件仍可写回数据，也不自动重载。结果区分 `package_removed`（`true` 或 `null`=结果未知）与 `data`（`kept`/`not_attempted`/`absent`/`removed`/`partial_or_unknown`）；删除包且结果确定时 `requires_loader_restart: true`。
+5. `partial_or_unknown` 或包结果未知是明确失败：不回滚、不自动重试、不承诺无副作用。需要移除已加载实例时另行取得整加载器 `cockpit_reload` 授权。
