@@ -1164,5 +1164,67 @@ class ReconcileFallbackTests(unittest.IsolatedAsyncioTestCase):
             svc.close()
 
 
+class ServiceLogSeverityTests(unittest.IsolatedAsyncioTestCase):
+    """服务日志分级：上游 diagnoseAPI 2=INFO、3=WARN；绑定成功为 INFO，失败路径保持 WARN。"""
+
+    def make(self, manager):
+        logs = []
+
+        def log(level, message):
+            logs.append((level, message))
+
+        proc = SimpleNamespace(log=log)
+        svc = service._Service(
+            Context(proc, '/unused', '/unused/data'), None, (), CALL_TIMEOUT, manager)
+        svc.app = object()
+        svc.runner = object()
+        return svc, logs
+
+    async def test_normal_binding_success_logs_info(self):
+        manager = PersistManager()
+        svc, logs = self.make(manager)
+        site, made = site_factory(lambda port: 'ok')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                await svc._reconcile()
+            self.assertEqual(svc.bound, ('127.0.0.1', 8767))
+            self.assertEqual(logs, [(2, '[OlivOSCockpit] Service listening on 127.0.0.1:8767.')])
+        finally:
+            svc.close()
+
+    async def test_fallback_binding_success_logs_info(self):
+        manager = PersistManager()
+        svc, logs = self.make(manager)
+        busy = {8767}
+        site, made = site_factory(lambda port: 'inuse' if port in busy else 'ok')
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                task = asyncio.ensure_future(svc._reconcile())
+                self.assertTrue(await asyncio.to_thread(manager.requested.wait, 2))
+                manager.values['listen_port'] = 8768
+                manager.future.set_result(True)
+                await asyncio.wait_for(task, 2)
+            self.assertEqual(svc.bound, ('127.0.0.1', 8768))
+            self.assertEqual(logs, [(2, '[OlivOSCockpit] Service listening on 127.0.0.1:8768.')])
+        finally:
+            svc.close()
+
+    async def test_non_address_in_use_failure_stays_warn(self):
+        manager = PersistManager()
+        svc, logs = self.make(manager)
+        site, made = site_factory(lambda port: OSError(errno.EACCES, 'denied'))
+        try:
+            with patch.object(service, 'web', SimpleNamespace(TCPSite=site)):
+                await svc._reconcile()
+            self.assertIsNone(svc.bound)
+            self.assertEqual(len(logs), 1)
+            level, message = logs[0]
+            self.assertEqual(level, 3)
+            self.assertEqual(message,
+                             '[OlivOSCockpit] Service could not listen on the configured address.')
+        finally:
+            svc.close()
+
+
 if __name__ == '__main__':
     unittest.main()

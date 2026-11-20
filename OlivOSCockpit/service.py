@@ -470,12 +470,13 @@ class _Service:
 
     # ---- 监听与重绑 -----------------------------------------------------
 
-    def _log(self, message):
+    def _log(self, message, level=3):
+        # 上游 diagnoseAPI：2=INFO、3=WARN；仅绑定成功路径显式传 INFO。
         proc = getattr(getattr(self, 'context', None), 'proc', None)
         if proc is None:
             return
         try:
-            proc.log(3, '[OlivOSCockpit] ' + message)
+            proc.log(level, '[OlivOSCockpit] ' + message)
         except BaseException:
             pass
 
@@ -610,7 +611,7 @@ class _Service:
             if not fallback:
                 self.bound = (host_name, port)
                 self._serving = True
-                self._log('Service listening on %s:%d.' % (host_name, port))
+                self._log('Service listening on %s:%d.' % (host_name, port), 2)
                 return
             try:
                 accepted = await self._confirm_fallback(manager, snapshot, port)
@@ -623,7 +624,7 @@ class _Service:
             if accepted:
                 self.bound = (host_name, port)
                 self._serving = True
-                self._log('Service listening on %s:%d.' % (host_name, port))
+                self._log('Service listening on %s:%d.' % (host_name, port), 2)
                 return
             await self._stop_site()
             self._log('Service could not confirm an available listening port.')
