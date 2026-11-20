@@ -9,7 +9,7 @@ import unittest
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-RELEASE = 'v0.4.0'
+RELEASE = 'v0.5.0'
 _spec = importlib.util.spec_from_file_location('build_opk', ROOT / 'scripts' / 'build_opk.py')
 builder = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(builder)
@@ -107,10 +107,10 @@ class BuildTests(unittest.TestCase):
             'skills/olivos-cockpit/SKILL.md': ROOT / 'skills' / 'olivos-cockpit' / 'SKILL.md',
         }
         cases = (
-            ('OlivOSCockpit/app.json', '"version": "v0.4.0"', '"version": "v0.4.1"'),
-            ('OlivOSCockpit/app.json', '"version": "v0.4.0"', '"version": "0.4.0"'),
-            ('OlivOSCockpit/contracts.py', "VERSION = 'v0.4.0'", "VERSION = 'v0.4.1'"),
-            ('skills/olivos-cockpit/SKILL.md', 'version: v0.4.0', 'version: v0.4.1'),
+            ('OlivOSCockpit/app.json', '"version": "v0.5.0"', '"version": "v0.5.1"'),
+            ('OlivOSCockpit/app.json', '"version": "v0.5.0"', '"version": "0.5.0"'),
+            ('OlivOSCockpit/contracts.py', "VERSION = 'v0.5.0'", "VERSION = 'v0.5.1'"),
+            ('skills/olivos-cockpit/SKILL.md', 'version: v0.5.0', 'version: v0.5.1'),
         )
         for relative, old, new in cases:
             with self.subTest(relative=relative, replacement=new), \
