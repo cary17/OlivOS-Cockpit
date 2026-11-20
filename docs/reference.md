@@ -38,6 +38,7 @@
 
 - **QQ Guild v2**：仅 `cockpit_send` 的 `send_type: "group"` 接受可选 `target_type`。发 QQ 群时传 `"qq_group"` 和该账号可用的 QQ 群 openid；发频道子频道时传 `"guild_channel"` 和子频道 ID。省略时保持频道路由，不按 ID 外观或入站事件猜测。识别到宿主明确的本地拒绝时返回工具错误，不回显原生错误详情。
 - **Milky**：标准 `onebot / qq` Milky 模型须使用宿主自动适配器。通用和专用工具走同一原生控制队列；`target_id` 为正十进制字符串（至多 256 bits），不经浮点数转换。队列不可用、已满或入队失败返回 `isError: true`，不走其他发送路径；成功只说明宿主控制队列已接收，不等待适配器回包。
+- **Telegram**：群文本新调用推荐 `cockpit_telegram_send_group`；`cockpit_telegram_send` 是它的兼容别名，发送参数与群路由相同（同 `bot_hash/message/target_id`），结果仅 `action` 回显值不同。一次发送只调用其中一个工具，失败不通过别名重放或补发。
 - QQ Guild v1 主动私聊、通用工具缺 `host_id` 的 DoDo poll 私聊，以及没有可用发送分支或队列的 DoDo EA 仍返回 `isError: true`。DoDo poll 专用私聊工具可显式传入 `host_id`。
 
 `submitted: true` 不代表远端接受或送达，`delivery` 恒为 `unknown`。对仍使用 `event.send()` 的路径，宿主返回 `None` 不能单独用来判断失败。发送与原生查询使用同一个 256-bit 整数账号 ID 校验上限，不等于下游支持任意长度的目标 ID。

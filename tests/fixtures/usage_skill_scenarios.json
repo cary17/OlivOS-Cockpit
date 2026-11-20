@@ -163,6 +163,19 @@
       ]
     },
     {
+      "id": "telegram-group-compatibility-alias",
+      "user_request": "用我指定的 Telegram 账号，向确认的群发送这条测试文本一次。",
+      "environment": {
+        "client_connection": "已连接 Full 版隔离测试 Cockpit；仅模拟发送",
+        "visible_cockpit_tools": ["cockpit_bots", "cockpit_telegram_send", "cockpit_telegram_send_group"],
+        "fixture_state": "已给出明确账号、群 ID 和正文；两个群发入口的参数相同；模拟工具报告 submitted: true、delivery: unknown。"
+      },
+      "criteria": [
+        "核对现场 schema，优先选择 cockpit_telegram_send_group，使用用户确认的账号、目标和正文恰好调用一次。",
+        "不再调用兼容别名 cockpit_telegram_send；只报告已提交和送达未知。"
+      ]
+    },
+    {
       "id": "read-large-account-id-exactly",
       "user_request": "只读核对这个运行中账号与存档中的账号 ID 是否一致，并报出精确 ID。",
       "environment": {

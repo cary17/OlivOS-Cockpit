@@ -133,13 +133,22 @@ def _spec(adapter, action, send_type, target_name, extras):
         properties['target_id']['description'] = 'Positive decimal ID; submission means control-queue acceptance only.'
     for name in extras:
         properties[name] = {'type': 'string', 'minLength': 1, 'maxLength': MAX_ID}
+    description = (
+        f'Send text-only via the {adapter} adapter ({send_type}). '
+        'Only a single text segment is built; images, files, paths and URLs are '
+        'not accepted. Submission is not proof of delivery.'
+    )
+    if (adapter, action) == ('telegram', 'send'):
+        description += (
+            ' Compatibility alias for cockpit_telegram_send_group (same parameters '
+            'and group route); one call per intended send; prefer '
+            'cockpit_telegram_send_group for new calls.'
+        )
+    elif (adapter, action) == ('telegram', 'send_group'):
+        description += ' One call per intended send.'
     return ToolSpec(
         name=f'cockpit_{adapter}_{action}',
-        description=(
-            f'Send text-only via the {adapter} adapter ({send_type}). '
-            'Only a single text segment is built; images, files, paths and URLs are '
-            'not accepted. Submission is not proof of delivery.'
-        ),
+        description=description,
         schema=object_schema(properties, ('bot_hash', 'message') + tuple(
             name for name in (target_name,) + extras if name is not None)),
         handler=_handler(adapter, action, send_type, target_name, extras),

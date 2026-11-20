@@ -23,8 +23,9 @@
 
 尖括号内容必须在调用前替换，不能直接提交示例。仅当通用发送与目标平台语义匹配时使用；原生模式被拒绝时，不换裸 API 或不安全字符串回退。
 
-专用文本工具从实际列表选择 `cockpit_<adapter>_send_private/send_group` 等名称。目前公开族包括 dingtalk、discord、dodo_link、dodo_poll、fanbook、kaiheila、milky、red、telegram；telegram 还可能有 send 名称。按 schema 传 bot_hash、message、必要 target_id；dodo_poll 私聊还需要 host_id。不存在的专用工具不能靠猜名调用。
+专用文本工具从实际列表选择 `cockpit_<adapter>_send_private/send_group` 等名称。目前公开族包括 dingtalk、discord、dodo_link、dodo_poll、fanbook、kaiheila、milky、red、telegram。按 schema 传 bot_hash、message、必要 target_id；dodo_poll 私聊还需要 host_id。不存在的专用工具不能靠猜名调用。
 
+- **Telegram 群文本**：两个入口都可用时，优先选 `cockpit_telegram_send_group`；`cockpit_telegram_send` 是兼容别名，发送参数和群路由相同。一次发送只选一个工具，失败后不要换别名重发。
 - **QQ Guild v2 群发**：确认目标是 QQ 群还是频道子频道。发 QQ 群时用 `send_type: "group"`、`target_type: "qq_group"` 和用户确认的群 openid；发子频道时用 `"guild_channel"` 和子频道 ID。省略 `target_type` 仍走频道；不要从 ID 外观或对话历史猜路由。如果现场 schema 没有 `target_type`，停止 QQ 群发送，不省略该字段来试。
 - **Milky**：标准自动适配器账号可用通用工具或与私聊／群发方向对应的专用工具，按原样传正十进制字符串 `target_id`，不转换成浮点数。`submitted: true` 仅证明已进入 OlivOS 控制队列；队列不可用或已满是提交失败，不改用另一个工具补发。
 - **DoDo poll 私聊**：用户确认所属 `host_id` 后选支持该参数的专用工具；通用工具不具备该上下文。

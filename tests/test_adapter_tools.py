@@ -270,18 +270,36 @@ class SubmissionTests(unittest.TestCase):
                 self.assertEqual(sends(sdk), [])
 
     def test_telegram_group_builds_single_text_segment(self):
-        ctx, _, sdk = make()
-        out = spec('cockpit_telegram_send_group').handler(ctx, dict(MILKY_ARGS, bot_hash='t'))
-        self.assertFalse(out.is_error, out.data)
-        self.assertEqual(out.data['adapter'], 'telegram')
-        self.assertEqual(out.data['send_type'], 'group')
-        self.assertEqual(out.data['delivery'], 'unknown')
-        sent = sends(sdk)[0]
-        send_type, target, message, host_id = sent
-        self.assertEqual((send_type, target, host_id), ('group', '42', None))
-        self.assertEqual(message.mode_rx, 'olivos_para')
-        self.assertEqual([(para.type, para.data) for para in message.data],
-                         [('text', {'text': 'hello'})])
+        # cockpit_telegram_send 是 cockpit_telegram_send_group 的兼容别名：
+        # 同 schema、同权限、同一提交路径；返回 action 各自保留（send≠send_group）。
+        for name, action in (('cockpit_telegram_send', 'send'),
+                             ('cockpit_telegram_send_group', 'send_group')):
+            with self.subTest(name=name):
+                ctx, _, sdk = make()
+                args = {'bot_hash': 't', 'message': 'hello', 'target_id': '42'}
+                out = spec(name).handler(ctx, args)
+                self.assertFalse(out.is_error, out.data)
+                self.assertEqual(out.data['adapter'], 'telegram')
+                self.assertEqual(out.data['action'], action)
+                self.assertEqual(out.data['send_type'], 'group')
+                self.assertEqual(out.data['delivery'], 'unknown')
+                sent = sends(sdk)
+                self.assertEqual([(c[0], c[1], c[3]) for c in sent],
+                                 [('group', '42', None)])
+                message = sent[0][2]
+                self.assertEqual(message.mode_rx, 'olivos_para')
+                self.assertEqual([(para.type, para.data) for para in message.data],
+                                 [('text', {'text': 'hello'})])
+
+    def test_telegram_send_alias_matches_send_group(self):
+        alias = spec('cockpit_telegram_send')
+        group = spec('cockpit_telegram_send_group')
+        self.assertEqual(alias.schema, group.schema)
+        self.assertEqual(alias.required_permission, group.required_permission)
+        self.assertEqual(alias.read_only, group.read_only)
+        self.assertIn('Compatibility alias for cockpit_telegram_send_group', alias.description)
+        self.assertIn('same parameters and group route', alias.description)
+        self.assertNotIn('Compatibility alias', group.description)
 
     def test_platform_hint_is_not_interpreted_as_segments(self):
         ctx, _, sdk = make()
