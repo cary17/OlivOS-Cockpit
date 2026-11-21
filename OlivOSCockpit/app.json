@@ -7,6 +7,7 @@
     "version": "v0.5.0",
     "svn": 2,
     "compatible_svn": 190,
+    "market_compatibility": {"python_min": [3, 11], "modules": ["aiohttp"]},
     "message_mode": "olivos_string",
     "support": [
         {"sdk": "all", "platform": "all", "model": "all"}
